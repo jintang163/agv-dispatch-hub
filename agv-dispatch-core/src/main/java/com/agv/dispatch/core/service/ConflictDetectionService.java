@@ -19,6 +19,22 @@ import java.util.stream.Collectors;
 
 import static com.agv.dispatch.common.constant.RedisKeyConstant.CONFLICT_KEY;
 
+/**
+ * 冲突检测与解决服务
+ * 实时检测多AGV运行中的各种冲突，并自动应用解决策略
+ *
+ * 检测的冲突类型：
+ * - 对向冲突：两AGV相向行驶在同一段路径
+ * - 交叉冲突：两AGV路径在某节点交叉
+ * - 跟车冲突：后车速度快于前车，距离过近
+ * - 资源冲突：多AGV抢占同一节点或资源
+ *
+ * 解决策略（按优先级）：
+ * 1. 任务优先级比较：高优先级任务优先
+ * 2. 截止时间比较：截止时间早的任务优先
+ * 3. 任务进度比较：进度快的任务优先
+ * 低优先级AGV暂停让行
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -32,6 +48,13 @@ public class ConflictDetectionService {
 
     private static final double SAFE_DISTANCE = 2.0;
 
+    /**
+     * 检测所有类型的冲突
+     * 依次检测路径冲突、位置冲突、资源冲突
+     * 检测结果会缓存到Redis供实时查询
+     *
+     * @return 检测到的冲突记录列表
+     */
     public List<ConflictRecord> detectConflicts() {
         List<ConflictRecord> conflicts = new ArrayList<>();
 
@@ -43,6 +66,13 @@ public class ConflictDetectionService {
         return conflicts;
     }
 
+    /**
+     * 检测路径冲突
+     * 检查所有工作中AGV的前瞻路径（当前位置+3步）
+     * 如果多个AGV的前瞻路径包含同一节点，则判定为冲突
+     *
+     * @return 路径冲突记录列表
+     */
     private List<ConflictRecord> detectPathConflicts() {
         List<ConflictRecord> conflicts = new ArrayList<>();
         List<Agv> workingAgvs = agvRepository.findByStatusIn(
@@ -90,6 +120,15 @@ public class ConflictDetectionService {
         return conflicts;
     }
 
+    /**
+     * 判断冲突类型
+     * 根据两AGV的路径前后节点关系，判断具体的冲突类型
+     *
+     * @param agv1 发生冲突的AGV1
+     * @param agv2 发生冲突的AGV2
+     * @param node 冲突节点
+     * @return 冲突类型枚举
+     */
     private ConflictType determineConflictType(Agv agv1, Agv agv2, String node) {
         Task task1 = taskRepository.findById(agv1.getCurrentTaskId()).orElse(null);
         Task task2 = taskRepository.findById(agv2.getCurrentTaskId()).orElse(null);
@@ -129,6 +168,13 @@ public class ConflictDetectionService {
         return ConflictType.RESOURCE;
     }
 
+    /**
+     * 检测位置冲突
+     * 检查所有工作中AGV的实时位置，如果两AGV距离小于安全距离，则判定为冲突
+     * 安全距离默认为2米
+     *
+     * @return 位置冲突记录列表
+     */
     private List<ConflictRecord> detectPositionConflicts() {
         List<ConflictRecord> conflicts = new ArrayList<>();
         List<Agv> workingAgvs = agvRepository.findByStatusIn(
@@ -157,11 +203,27 @@ public class ConflictDetectionService {
         return conflicts;
     }
 
+    /**
+     * 检测资源冲突
+     * 预留接口，用于检测充电站、换乘站等共享资源的抢占冲突
+     *
+     * @return 资源冲突记录列表
+     */
     private List<ConflictRecord> detectResourceConflicts() {
         List<ConflictRecord> conflicts = new ArrayList<>();
         return conflicts;
     }
 
+    /**
+     * 创建冲突记录
+     * 记录冲突的AGV、类型、位置、关联任务等信息
+     *
+     * @param agv1 发生冲突的AGV1
+     * @param agv2 发生冲突的AGV2
+     * @param conflictType 冲突类型
+     * @param location 冲突位置（节点编号）
+     * @return 保存后的冲突记录
+     */
     private ConflictRecord createConflictRecord(Agv agv1, Agv agv2,
                                                 ConflictType conflictType, String location) {
         ConflictRecord record = new ConflictRecord();
@@ -179,6 +241,13 @@ public class ConflictDetectionService {
         return saved;
     }
 
+    /**
+     * 解决单个冲突
+     * 应用三级解决策略确定让行方，然后暂停让行AGV
+     *
+     * @param conflictId 冲突记录ID
+     * @return 解决策略说明
+     */
     public String resolveConflict(Long conflictId) {
         ConflictRecord conflict = conflictRecordRepository.findById(conflictId)
                 .orElseThrow(() -> new IllegalArgumentException("冲突记录不存在: " + conflictId));
@@ -198,6 +267,17 @@ public class ConflictDetectionService {
         return resolution;
     }
 
+    /**
+     * 应用冲突解决策略
+     * 三级判定策略：
+     * 1. 任务优先级比较：高优先级任务优先
+     * 2. 截止时间比较：截止时间早的任务优先
+     * 3. 任务进度比较：进度快的任务优先
+     * 低优先级AGV暂停让行
+     *
+     * @param conflict 冲突记录
+     * @return 解决策略说明
+     */
     private String applyResolutionStrategy(ConflictRecord conflict) {
         Task task1 = taskRepository.findById(conflict.getTaskId1()).orElse(null);
         Task task2 = taskRepository.findById(conflict.getTaskId2()).orElse(null);
@@ -250,6 +330,12 @@ public class ConflictDetectionService {
         }
     }
 
+    /**
+     * 暂停AGV（冲突解决时调用）
+     * 将AGV状态设置为暂停，等待冲突解除
+     *
+     * @param agv 需要暂停的AGV
+     */
     private void pauseAgv(Agv agv) {
         if (agv == null) {
             return;
@@ -259,6 +345,11 @@ public class ConflictDetectionService {
         log.info("AGV已暂停: {}", agv.getAgvNo());
     }
 
+    /**
+     * 自动解决所有未解决的冲突
+     * 按时间倒序处理所有未解决的冲突记录
+     * 处理失败的冲突会记录日志但不抛出异常
+     */
     public void resolveAllConflicts() {
         List<ConflictRecord> unresolved = conflictRecordRepository.findByResolvedFalseOrderByCreateTimeDesc();
         for (ConflictRecord conflict : unresolved) {
@@ -276,6 +367,12 @@ public class ConflictDetectionService {
         return Math.sqrt(dx * dx + dy * dy);
     }
 
+    /**
+     * 将冲突检测结果缓存到Redis
+     * 供前端实时查询和WebSocket推送
+     *
+     * @param conflicts 冲突记录列表
+     */
     private void cacheConflicts(List<ConflictRecord> conflicts) {
         if (conflicts.isEmpty()) {
             redisTemplate.delete(CONFLICT_KEY);
@@ -289,10 +386,23 @@ public class ConflictDetectionService {
         redisTemplate.opsForHash().putAll(CONFLICT_KEY, conflictData);
     }
 
+    /**
+     * 获取所有未解决的冲突记录
+     * 按创建时间倒序排列
+     *
+     * @return 未解决的冲突记录列表
+     */
     public List<ConflictRecord> getUnresolvedConflicts() {
         return conflictRecordRepository.findByResolvedFalseOrderByCreateTimeDesc();
     }
 
+    /**
+     * 检查AGV是否涉及高优先级任务的冲突
+     * 用于调度决策时判断是否需要特殊处理
+     *
+     * @param agvId AGV ID
+     * @return true表示该AGV涉及高优先级任务的冲突
+     */
     public boolean hasHighPriorityConflict(String agvId) {
         List<ConflictRecord> unresolved = getUnresolvedConflicts();
         for (ConflictRecord conflict : unresolved) {
