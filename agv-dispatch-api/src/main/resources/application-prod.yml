@@ -1,0 +1,23 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/agv_dispatch?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: ${DB_USER:agv_user}
+    password: ${DB_PASSWORD:agv_pass}
+
+  data:
+    redis:
+      host: redis
+      port: 6379
+      password: ${REDIS_PASSWORD:}
+      database: 0
+
+mqtt:
+  broker:
+    url: tcp://emqx:1883
+  username: admin
+  password: public
+
+logging:
+  level:
+    root: WARN
+    com.agv.dispatch: INFO

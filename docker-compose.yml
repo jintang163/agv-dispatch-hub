@@ -1,0 +1,148 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agv-dispatch-postgres
+    build:
+      context: ./docker/postgres
+    environment:
+      POSTGRES_DB: agv_dispatch
+      POSTGRES_USER: agv_admin
+      POSTGRES_PASSWORD: agv_admin123
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - agv-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agv_admin -d agv_dispatch"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: agv-dispatch-redis
+    environment:
+      TZ: Asia/Shanghai
+    command: >
+      redis-server
+      --requirepass agv_redis123
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - agv-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "agv_redis123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  emqx:
+    image: emqx/emqx:5.7.0
+    container_name: agv-dispatch-emqx
+    environment:
+      TZ: Asia/Shanghai
+      EMQX_NAME: agv-emqx
+      EMQX_HOST: emqx
+      EMQX_ALLOW_ANONYMOUS: 'true'
+      EMQX_LISTENER__TCP__EXTERNAL: 1883
+      EMQX_LISTENER__SSL__EXTERNAL: 8883
+      EMQX_LISTENER__WS__EXTERNAL: 8083
+      EMQX_LISTENER__WSS__EXTERNAL: 8084
+      EMQX_DASHBOARD__LISTENER__HTTP: 18083
+      EMQX_DASHBOARD__DEFAULT_USERNAME: admin
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: admin123
+    ports:
+      - "1883:1883"
+      - "8883:8883"
+      - "8083:8083"
+      - "8084:8084"
+      - "18083:18083"
+    volumes:
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+    networks:
+      - agv-network
+    healthcheck:
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  agv-dispatch-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agv-dispatch-api
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/agv_dispatch?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: agv_admin
+      SPRING_DATASOURCE_PASSWORD: agv_admin123
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: agv_redis123
+      SPRING_MQTT_HOST: tcp://emqx:1883
+      SPRING_MQTT_USERNAME: admin
+      SPRING_MQTT_PASSWORD: public
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"
+    volumes:
+      - api-logs:/app/logs
+    networks:
+      - agv-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    restart: unless-stopped
+
+  agv-dispatch-web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: agv-dispatch-web
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "80:80"
+    networks:
+      - agv-network
+    depends_on:
+      - agv-dispatch-api
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  emqx-data:
+    driver: local
+  emqx-log:
+    driver: local
+  api-logs:
+    driver: local
+
+networks:
+  agv-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

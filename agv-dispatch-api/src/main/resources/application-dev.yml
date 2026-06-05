@@ -1,0 +1,23 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/agv_dispatch?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: postgres
+    password: postgres
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:
+      database: 0
+
+mqtt:
+  broker:
+    url: tcp://localhost:1883
+  username: admin
+  password: public
+
+logging:
+  level:
+    com.agv.dispatch: DEBUG
+    org.hibernate.SQL: DEBUG
