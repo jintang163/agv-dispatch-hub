@@ -2,12 +2,14 @@ package com.agv.dispatch.mqtt.handler;
 
 import com.agv.dispatch.common.constant.MqttTopicConstant;
 import com.agv.dispatch.common.dto.AgvStatusDTO;
+import com.agv.dispatch.common.dto.AgvStatusReportDTO;
 import com.agv.dispatch.common.dto.TaskCreateDTO;
 import com.agv.dispatch.common.entity.Agv;
 import com.agv.dispatch.common.enums.AgvStatus;
 import com.agv.dispatch.common.enums.TaskStatus;
 import com.agv.dispatch.common.util.IdGenerator;
 import com.agv.dispatch.core.repository.AgvRepository;
+import com.agv.dispatch.core.service.AgvStatusService;
 import com.agv.dispatch.core.service.TaskDispatchService;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
@@ -30,6 +32,7 @@ import static com.agv.dispatch.common.constant.RedisKeyConstant.*;
 public class MqttMessageHandler {
 
     private final TaskDispatchService taskDispatchService;
+    private final AgvStatusService agvStatusService;
     private final AgvRepository agvRepository;
     private final StringRedisTemplate redisTemplate;
 
@@ -73,49 +76,35 @@ public class MqttMessageHandler {
             AgvStatusDTO statusDTO = JSON.parseObject(payload, AgvStatusDTO.class);
             String agvNo = extractAgvNo(topic);
 
-            Agv agv = agvRepository.findByAgvNo(agvNo).orElse(null);
-            if (agv == null) {
-                agv = new Agv();
+            if (!agvRepository.existsByAgvNo(agvNo)) {
+                Agv agv = new Agv();
                 agv.setId(IdGenerator.generateId());
                 agv.setAgvNo(agvNo);
                 agv.setName("AGV-" + agvNo);
+                agv.setStatus(AgvStatus.IDLE);
+                agv.setBatteryLevel(100.0);
+                agv.setXCoord(0.0);
+                agv.setYCoord(0.0);
                 agv.setCreateTime(LocalDateTime.now());
+                agvRepository.save(agv);
+                log.info("自动注册AGV: {}", agvNo);
             }
 
-            if (statusDTO.getStatus() != null) {
-                agv.setStatus(statusDTO.getStatus());
-            }
-            if (statusDTO.getCurrentPosition() != null) {
-                agv.setCurrentPosition(statusDTO.getCurrentPosition());
-            }
-            if (statusDTO.getBatteryLevel() != null) {
-                agv.setBatteryLevel(statusDTO.getBatteryLevel());
-            }
-            if (statusDTO.getXCoord() != null) {
-                agv.setXCoord(statusDTO.getXCoord());
-            }
-            if (statusDTO.getYCoord() != null) {
-                agv.setYCoord(statusDTO.getYCoord());
-            }
-            if (statusDTO.getAngle() != null) {
-                agv.setAngle(statusDTO.getAngle());
-            }
-            if (statusDTO.getSpeed() != null) {
-                agv.setSpeed(statusDTO.getSpeed());
-            }
-            if (statusDTO.getCurrentTaskId() != null) {
-                agv.setCurrentTaskId(statusDTO.getCurrentTaskId());
-            }
-            agv.setLastHeartbeat(LocalDateTime.now());
-            agv.setUpdateTime(LocalDateTime.now());
+            AgvStatusReportDTO reportDTO = new AgvStatusReportDTO();
+            reportDTO.setAgvNo(agvNo);
+            reportDTO.setStatus(statusDTO.getStatus() != null ? statusDTO.getStatus().name() : null);
+            reportDTO.setCurrentPosition(statusDTO.getCurrentPosition());
+            reportDTO.setBatteryLevel(statusDTO.getBatteryLevel());
+            reportDTO.setXCoord(statusDTO.getXCoord());
+            reportDTO.setYCoord(statusDTO.getYCoord());
+            reportDTO.setAngle(statusDTO.getAngle());
+            reportDTO.setSpeed(statusDTO.getSpeed());
+            reportDTO.setFaultCode(statusDTO.getFaultCode());
+            reportDTO.setFaultMessage(statusDTO.getFaultMessage());
 
-            agvRepository.save(agv);
+            agvStatusService.reportStatus(reportDTO);
 
-            String cacheKey = AGV_STATUS_PREFIX + agv.getId();
-            redisTemplate.opsForValue().set(cacheKey, JSON.toJSONString(agv),
-                    AGV_STATUS_SECONDS, TimeUnit.SECONDS);
-
-            log.debug("AGV状态更新: agvNo={}, status={}", agvNo, agv.getStatus());
+            log.debug("AGV状态更新: agvNo={}, status={}", agvNo, statusDTO.getStatus());
 
         } catch (Exception e) {
             log.error("处理AGV状态消息异常, topic={}, payload={}", topic, payload, e);

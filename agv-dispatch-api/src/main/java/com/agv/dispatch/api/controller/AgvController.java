@@ -1,5 +1,8 @@
 package com.agv.dispatch.api.controller;
 
+import com.agv.dispatch.common.dto.AgvRegisterDTO;
+import com.agv.dispatch.common.dto.AgvStatusReportDTO;
+import com.agv.dispatch.common.dto.AgvUpdateDTO;
 import com.agv.dispatch.common.dto.Result;
 import com.agv.dispatch.common.entity.Agv;
 import com.agv.dispatch.common.entity.Task;
@@ -7,12 +10,14 @@ import com.agv.dispatch.common.enums.AgvStatus;
 import com.agv.dispatch.common.enums.TaskStatus;
 import com.agv.dispatch.core.repository.AgvRepository;
 import com.agv.dispatch.core.repository.TaskRepository;
+import com.agv.dispatch.core.service.AgvStatusService;
 import com.agv.dispatch.core.service.TaskDispatchService;
 import com.agv.dispatch.mqtt.service.MqttMessageService;
 import com.alibaba.fastjson2.JSON;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.*;
@@ -26,14 +31,49 @@ import static com.agv.dispatch.common.constant.RedisKeyConstant.AGV_STATUS_PREFI
 @RestController
 @RequestMapping("/api/v1/agvs")
 @RequiredArgsConstructor
-@Tag(name = "AGV管理", description = "AGV查询、控制接口")
+@Tag(name = "AGV管理", description = "AGV查询、控制、注册、状态上报接口")
 public class AgvController {
 
     private final AgvRepository agvRepository;
     private final TaskRepository taskRepository;
     private final TaskDispatchService taskDispatchService;
+    private final AgvStatusService agvStatusService;
     private final MqttMessageService mqttMessageService;
     private final StringRedisTemplate redisTemplate;
+
+    @PostMapping
+    @Operation(summary = "注册AGV")
+    public Result<Agv> registerAgv(@Valid @RequestBody AgvRegisterDTO dto) {
+        return Result.success(agvStatusService.registerAgv(dto));
+    }
+
+    @PutMapping("/{agvId}")
+    @Operation(summary = "更新AGV信息")
+    public Result<Agv> updateAgv(
+            @PathVariable String agvId,
+            @RequestBody AgvUpdateDTO dto) {
+        return Result.success(agvStatusService.updateAgv(agvId, dto));
+    }
+
+    @DeleteMapping("/{agvId}")
+    @Operation(summary = "删除AGV")
+    public Result<Void> deleteAgv(@PathVariable String agvId) {
+        agvStatusService.deleteAgv(agvId);
+        return Result.success();
+    }
+
+    @PostMapping("/status/report")
+    @Operation(summary = "AGV状态上报")
+    public Result<Agv> reportStatus(@RequestBody AgvStatusReportDTO dto) {
+        return Result.success(agvStatusService.reportStatus(dto));
+    }
+
+    @PostMapping("/{agvId}/clear-fault")
+    @Operation(summary = "清除AGV故障")
+    public Result<Void> clearFault(@PathVariable String agvId) {
+        agvStatusService.clearFault(agvId);
+        return Result.success();
+    }
 
     @GetMapping
     @Operation(summary = "查询AGV列表")
@@ -41,9 +81,9 @@ public class AgvController {
             @Parameter(description = "AGV状态") @RequestParam(required = false) AgvStatus status) {
         List<Agv> agvs;
         if (status != null) {
-            agvs = agvRepository.findByStatus(status);
+            agvs = agvStatusService.getAgvsByStatus(status);
         } else {
-            agvs = agvRepository.findAll();
+            agvs = agvStatusService.getAllAgvs();
         }
         return Result.success(agvs);
     }
@@ -51,19 +91,11 @@ public class AgvController {
     @GetMapping("/{agvId}")
     @Operation(summary = "查询AGV详情")
     public Result<Agv> getAgvById(@PathVariable String agvId) {
-        String cacheKey = AGV_STATUS_PREFIX + agvId;
-        String cached = redisTemplate.opsForValue().get(cacheKey);
-        if (cached != null && !cached.isEmpty()) {
-            try {
-                return Result.success(JSON.parseObject(cached, Agv.class));
-            } catch (Exception e) {
-                // ignore
-            }
+        try {
+            return Result.success(agvStatusService.getAgvById(agvId));
+        } catch (IllegalArgumentException e) {
+            return Result.fail(e.getMessage());
         }
-
-        return agvRepository.findById(agvId)
-                .map(Result::success)
-                .orElse(Result.fail("AGV不存在"));
     }
 
     @GetMapping("/{agvId}/current-task")
@@ -146,15 +178,7 @@ public class AgvController {
 
     @GetMapping("/statistics")
     @Operation(summary = "获取AGV统计信息")
-    public Result<Map<String, Long>> getAgvStatistics() {
-        Map<String, Long> stats = new HashMap<>();
-        stats.put("total", agvRepository.count());
-        stats.put("idle", agvRepository.countByStatus(AgvStatus.IDLE));
-        stats.put("working", agvRepository.countByStatus(AgvStatus.WORKING));
-        stats.put("charging", agvRepository.countByStatus(AgvStatus.CHARGING));
-        stats.put("fault", agvRepository.countByStatus(AgvStatus.FAULT));
-        stats.put("offline", agvRepository.countByStatus(AgvStatus.OFFLINE));
-        stats.put("paused", agvRepository.countByStatus(AgvStatus.PAUSED));
-        return Result.success(stats);
+    public Result<Map<String, Object>> getAgvStatistics() {
+        return Result.success(agvStatusService.getAgvStatistics());
     }
 }

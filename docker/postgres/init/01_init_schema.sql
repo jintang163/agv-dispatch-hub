@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS agv_robot (
     speed DOUBLE PRECISION,
     model VARCHAR(128),
     max_load DOUBLE PRECISION,
+    allowed_task_types VARCHAR(256),
     ip_address VARCHAR(128),
     last_heartbeat TIMESTAMP,
     fault_code VARCHAR(256),

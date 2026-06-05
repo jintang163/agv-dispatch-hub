@@ -1,12 +1,14 @@
 package com.agv.dispatch.common.entity;
 
 import com.agv.dispatch.common.enums.AgvStatus;
+import com.agv.dispatch.common.enums.TaskType;
 import jakarta.persistence.*;
 import lombok.Data;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Data
 @Entity
@@ -48,6 +50,10 @@ public class Agv {
     private String model;
 
     private Double maxLoad;
+
+    @Convert(converter = TaskTypeListConverter.class)
+    @Column(columnDefinition = "VARCHAR(256)")
+    private List<TaskType> allowedTaskTypes;
 
     @Column(length = 128)
     private String ipAddress;
