@@ -34,6 +34,12 @@ const routes = [
     name: 'Dispatch',
     component: () => import('@/views/DispatchControl.vue'),
     meta: { title: '调度控制' }
+  },
+  {
+    path: '/path-planning',
+    name: 'PathPlanning',
+    component: () => import('@/views/PathPlanning.vue'),
+    meta: { title: '路径规划与冲突解决' }
   }
 ]
 

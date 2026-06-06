@@ -24,21 +24,60 @@ import java.util.stream.Collectors;
 
 import static com.agv.dispatch.common.constant.RedisKeyConstant.*;
 
+/**
+ * 死锁检测与恢复服务
+ * 负责定时检测AGV调度系统中的死锁情况，通过构建等待图和深度优先搜索算法检测循环等待，
+ * 并采用牺牲AGV策略进行死锁恢复，支持绕行重规划、任务重分配和标准恢复三种策略
+ *
+ * @author agv-dispatch
+ * @since 2026-06-06
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class DeadlockDetectionService {
 
+    /**
+     * AGV数据访问层
+     */
     private final AgvRepository agvRepository;
+
+    /**
+     * 任务数据访问层
+     */
     private final TaskRepository taskRepository;
+
+    /**
+     * 死锁记录数据访问层
+     */
     private final DeadlockRecordRepository deadlockRecordRepository;
+
+    /**
+     * 路径规划服务，用于路径解码、节点查询、锁管理等
+     */
     private final PathPlanningService pathPlanningService;
+
+    /**
+     * 任务调度服务，用于死锁恢复时的任务重分配（延迟加载避免循环依赖）
+     */
     @Lazy
     private final TaskDispatchService taskDispatchService;
+
+    /**
+     * Redis模板，用于分布式锁和缓存
+     */
     private final StringRedisTemplate redisTemplate;
 
+    /**
+     * 死锁检测的最小AGV数量，等待链中AGV数量达到此值才判定为死锁
+     */
     private static final int MIN_DEADLOCK_AGVS = 2;
 
+    /**
+     * 定时死锁检测任务
+     * 每10秒执行一次死锁检测，使用Redis分布式锁保证多实例部署时只有一个实例执行检测，
+     * 检测完成后自动释放锁。锁持有者校验确保只有获取锁的实例才能释放锁，避免误删
+     */
     @Scheduled(fixedDelay = 10000)
     public void scheduledDeadlockDetection() {
         try {
@@ -63,6 +102,13 @@ public class DeadlockDetectionService {
         }
     }
 
+    /**
+     * 检测并解决所有死锁
+     * 先调用detectDeadlocks检测系统中的所有死锁，然后逐个调用resolveDeadlock解决，
+     * 最后将死锁信息缓存到Redis中，整个过程异常隔离，单个死锁处理失败不影响其他死锁
+     *
+     * @return 死锁记录列表
+     */
     public List<DeadlockRecord> detectAndResolveDeadlocks() {
         List<DeadlockRecord> deadlocks = detectDeadlocks();
 
@@ -78,6 +124,16 @@ public class DeadlockDetectionService {
         return deadlocks;
     }
 
+    /**
+     * 检测系统中的死锁
+     * 死锁检测算法流程：
+     * 1. 构建AGV等待关系图（waitGraph）
+     * 2. 使用DFS深度优先搜索算法检测等待图中的循环
+     * 3. 对于每个循环，如果包含至少MIN_DEADLOCK_AGVS辆AGV，则判定为死锁
+     * 4. 创建死锁记录并返回
+     *
+     * @return 死锁记录列表
+     */
     public List<DeadlockRecord> detectDeadlocks() {
         List<DeadlockRecord> deadlocks = new ArrayList<>();
 
@@ -100,6 +156,15 @@ public class DeadlockDetectionService {
         return deadlocks;
     }
 
+    /**
+     * 构建AGV等待关系图
+     * 遍历所有工作中（WORKING或PAUSED状态）的AGV，从两个维度构建等待关系：
+     * 1. 显式等待关系：通过getAgvWaitingFor获取AGV正在等待的目标AGV
+     * 2. 隐式等待关系：分析AGV未来路径（向前预测3步），如果路径节点被其他AGV占用，则建立等待关系
+     * 等待图结构：key为等待方AGV ID，value为被等待方AGV ID
+     *
+     * @return 等待关系图
+     */
     private Map<String, String> buildWaitGraph() {
         Map<String, String> waitGraph = new HashMap<>();
 
@@ -141,6 +206,17 @@ public class DeadlockDetectionService {
         return waitGraph;
     }
 
+    /**
+     * 检测等待图中的循环
+     * 使用深度优先搜索（DFS）算法检测有向图中的环，通过三个辅助集合实现：
+     * - visited：记录已访问过的所有节点，避免重复处理
+     * - inStack：记录当前递归栈中的节点，用于检测环
+     * - path：记录当前搜索路径，用于提取环
+     * 对每个未访问的节点启动一次DFS搜索
+     *
+     * @param waitGraph 等待关系图
+     * @return 所有循环的列表，每个循环是一个AGV ID列表
+     */
     private List<List<String>> findCycles(Map<String, String> waitGraph) {
         List<List<String>> cycles = new ArrayList<>();
         Set<String> visited = new HashSet<>();
@@ -210,6 +286,15 @@ public class DeadlockDetectionService {
         return deadlockRecordRepository.save(record);
     }
 
+    /**
+     * 手动解决单个死锁
+     * 根据死锁ID查找死锁记录，检查死锁是否已解决，
+     * 然后调用resolveDeadlock(DeadlockRecord)方法执行死锁恢复
+     *
+     * @param deadlockId 死锁记录ID
+     * @return 死锁解决结果描述
+     * @throws IllegalArgumentException 当死锁记录不存在时抛出
+     */
     @Transactional
     public String resolveDeadlock(Long deadlockId) {
         DeadlockRecord deadlock = deadlockRecordRepository.findById(deadlockId)
@@ -269,6 +354,18 @@ public class DeadlockDetectionService {
         }
     }
 
+    /**
+     * 选择牺牲AGV
+     * 采用评分机制选择死锁中需要被牺牲的AGV，评分越低越容易被选中。
+     * 评分维度包括：
+     * - 任务优先级：高优先级任务加100分，中优先级加50分
+     * - 任务截止时间：30分钟内截止加200分，60分钟内截止加100分
+     * - 任务进度：进度百分比转换为分数（0-100分）
+     * 无任务的AGV直接获得最低分（Integer.MIN_VALUE），优先被牺牲
+     *
+     * @param waitChain 等待链中的AGV ID列表
+     * @return 被选中的牺牲AGV ID
+     */
     private String selectVictimAgv(List<String> waitChain) {
         String bestCandidate = null;
         int bestScore = Integer.MAX_VALUE;
@@ -370,6 +467,19 @@ public class DeadlockDetectionService {
         return ConflictResolutionStrategy.DEADLOCK_RECOVERY;
     }
 
+    /**
+     * 执行绕行死锁恢复
+     * 为牺牲AGV规划一条避开死锁等待链中其他AGV路径节点的新路径，
+     * 绕行时会避开其他AGV当前位置前后的节点（otherStep-1到otherStep+3），
+     * 如果绕行失败则回退到任务重分配策略。绕行成功后：
+     * 1. 更新任务路径和当前步骤
+     * 2. 释放旧路径锁并占用新路径
+     * 3. 清除等待关系并恢复AGV为WORKING状态
+     *
+     * @param agvId 牺牲AGV的ID
+     * @param waitChain 死锁等待链
+     * @return 绕行恢复结果描述
+     */
     private String performDetourRecovery(String agvId, List<String> waitChain) {
         Agv agv = agvRepository.findById(agvId).orElse(null);
         if (agv == null) {
@@ -440,6 +550,17 @@ public class DeadlockDetectionService {
         return String.format("AGV %s 绕行重规划成功，打破死锁", agv.getAgvNo());
     }
 
+    /**
+     * 执行任务重分配死锁恢复
+     * 将牺牲AGV的当前任务重新分配给其他可用AGV，从而打破死锁循环。
+     * 执行步骤：
+     * 1. 释放牺牲AGV占用的所有路径锁和等待关系
+     * 2. 调用任务调度服务将任务重新分配给其他AGV
+     * 3. 将牺牲AGV状态设置为IDLE，清空当前任务ID
+     *
+     * @param agvId 牺牲AGV的ID
+     * @return 任务重分配恢复结果描述
+     */
     private String performReassignRecovery(String agvId) {
         Agv agv = agvRepository.findById(agvId).orElse(null);
         if (agv == null) {
@@ -513,10 +634,21 @@ public class DeadlockDetectionService {
         redisTemplate.opsForHash().putAll(DEADLOCK_KEY, deadlockData);
     }
 
+    /**
+     * 获取所有未解决的死锁记录
+     * 按创建时间倒序查询所有未解决的死锁记录，用于监控和人工干预
+     *
+     * @return 未解决的死锁记录列表
+     */
     public List<DeadlockRecord> getUnresolvedDeadlocks() {
         return deadlockRecordRepository.findByResolvedFalseOrderByCreateTimeDesc();
     }
 
+    /**
+     * 强制解决所有未解决的死锁
+     * 遍历所有未解决的死锁记录，逐个调用resolveDeadlock方法解决，
+     * 异常隔离机制确保单个死锁处理失败不影响其他死锁的处理
+     */
     public void resolveAllDeadlocks() {
         List<DeadlockRecord> unresolved = getUnresolvedDeadlocks();
         for (DeadlockRecord deadlock : unresolved) {

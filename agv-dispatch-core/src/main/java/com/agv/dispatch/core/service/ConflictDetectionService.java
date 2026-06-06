@@ -25,20 +25,62 @@ import java.util.stream.Collectors;
 
 import static com.agv.dispatch.common.constant.RedisKeyConstant.*;
 
+/**
+ * 冲突检测与解决服务
+ * 负责检测AGV之间的各类冲突（路径冲突、位置冲突、资源冲突、路口冲突），
+ * 并根据冲突类型选择最优解决策略（等待、绕行、让行、重分配），
+ * 同时管理路口通行协议和分布式锁的生命周期
+ *
+ * @author agv-dispatch
+ * @since 2026-06-06
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ConflictDetectionService {
 
+    /**
+     * AGV数据访问层
+     */
     private final AgvRepository agvRepository;
+
+    /**
+     * 任务数据访问层
+     */
     private final TaskRepository taskRepository;
+
+    /**
+     * 冲突记录数据访问层
+     */
     private final ConflictRecordRepository conflictRecordRepository;
+
+    /**
+     * 路径规划服务，用于路径解码、节点查询、锁管理等
+     */
     private final PathPlanningService pathPlanningService;
+
+    /**
+     * Redis模板，用于分布式缓存和锁管理
+     */
     private final StringRedisTemplate redisTemplate;
 
+    /**
+     * AGV安全距离（米），小于此距离视为位置冲突
+     */
     private static final double SAFE_DISTANCE = 2.0;
+
+    /**
+     * 绕行策略阈值，当有至少此数量的绕行选项时采用绕行策略
+     */
     private static final int DETOUR_THRESHOLD = 2;
 
+    /**
+     * 检测所有类型的冲突
+     * 综合检测路径冲突、位置冲突、资源冲突和路口冲突四类冲突，
+     * 检测完成后将冲突结果缓存到Redis中
+     *
+     * @return 冲突记录列表
+     */
     public List<ConflictRecord> detectConflicts() {
         List<ConflictRecord> conflicts = new ArrayList<>();
 
@@ -98,6 +140,13 @@ public class ConflictDetectionService {
         return conflicts;
     }
 
+    /**
+     * 检测路口冲突
+     * 分析所有工作中AGV的未来路径（向前预测5步），识别即将到达同一路口的多辆AGV，
+     * 当发现至少2辆AGV将到达同一路口时，生成路口冲突记录
+     *
+     * @return 路口冲突记录列表
+     */
     private List<ConflictRecord> detectIntersectionConflicts() {
         List<ConflictRecord> conflicts = new ArrayList<>();
         List<Agv> workingAgvs = agvRepository.findByStatusIn(
@@ -241,6 +290,15 @@ public class ConflictDetectionService {
         return saved;
     }
 
+    /**
+     * 解决单个冲突
+     * 根据冲突ID查找冲突记录，检查冲突是否已解决，
+     * 然后应用相应的解决策略，最后更新冲突记录状态为已解决
+     *
+     * @param conflictId 冲突记录ID
+     * @return 冲突解决结果描述
+     * @throws IllegalArgumentException 当冲突记录不存在时抛出
+     */
     @Transactional
     public String resolveConflict(Long conflictId) {
         ConflictRecord conflict = conflictRecordRepository.findById(conflictId)
@@ -288,6 +346,21 @@ public class ConflictDetectionService {
         }
     }
 
+    /**
+     * 选择冲突解决策略
+     * 根据冲突类型、任务属性和节点类型智能选择最优解决策略：
+     * 1. 对向冲突优先考虑绕行（如果有足够绕行选项），否则等待
+     * 2. 交叉冲突在路口采用让行策略，否则等待
+     * 3. 路口节点冲突采用让行策略
+     * 4. 其他情况默认采用等待策略
+     *
+     * @param conflict 冲突记录
+     * @param task1 AGV1的任务
+     * @param task2 AGV2的任务
+     * @param agv1 AGV1实体
+     * @param agv2 AGV2实体
+     * @return 冲突解决策略枚举
+     */
     private ConflictResolutionStrategy selectResolutionStrategy(ConflictRecord conflict,
                                                            Task task1, Task task2,
                                                            Agv agv1, Agv agv2) {
@@ -337,6 +410,22 @@ public class ConflictDetectionService {
         return result.isSuccess() ? 1 : 0;
     }
 
+    /**
+     * 应用等待策略
+     * 根据以下优先级顺序决定哪辆AGV需要暂停等待：
+     * 1. 任务存在性：无任务的AGV让行
+     * 2. 任务优先级：低优先级任务让行
+     * 3. 任务截止时间：截止时间晚的任务让行
+     * 4. 任务进度：进度慢的AGV让行
+     * 暂停的AGV会设置等待关系，等待对方通过后再继续
+     *
+     * @param conflict 冲突记录
+     * @param task1 AGV1的任务
+     * @param task2 AGV2的任务
+     * @param agv1 AGV1实体
+     * @param agv2 AGV2实体
+     * @return 等待策略执行结果描述
+     */
     private String applyWaitStrategy(ConflictRecord conflict,
                                     Task task1, Task task2,
                                     Agv agv1, Agv agv2) {
@@ -389,6 +478,20 @@ public class ConflictDetectionService {
         }
     }
 
+    /**
+     * 应用绕行策略
+     * 为冲突中的AGV规划避开冲突节点的新路径，选择绕行对象的优先级：
+     * 1. 如果两辆AGV都有绕行选项，选择优先级低的AGV绕行
+     * 2. 如果只有一辆AGV有绕行选项，让该AGV绕行
+     * 3. 如果都没有绕行选项，回退到等待策略
+     *
+     * @param conflict 冲突记录
+     * @param task1 AGV1的任务
+     * @param task2 AGV2的任务
+     * @param agv1 AGV1实体
+     * @param agv2 AGV2实体
+     * @return 绕行策略执行结果描述
+     */
     private String applyDetourStrategy(ConflictRecord conflict,
                                      Task task1, Task task2,
                                      Agv agv1, Agv agv2) {
@@ -458,6 +561,21 @@ public class ConflictDetectionService {
         return String.format("%s绕行失败，转为等待策略", agvLabel);
     }
 
+    /**
+     * 应用让行策略（路口会车协议）
+     * 通过分布式路口锁实现先到先得的路口通行机制：
+     * 1. 尝试为AGV1获取路口锁，成功则让AGV2等待
+     * 2. 尝试为AGV2获取路口锁，成功则让AGV1等待
+     * 3. 如果都获取失败，回退到等待策略
+     * 获取锁的AGV可以优先通过路口，未获取锁的AGV暂停等待
+     *
+     * @param conflict 冲突记录
+     * @param task1 AGV1的任务
+     * @param task2 AGV2的任务
+     * @param agv1 AGV1实体
+     * @param agv2 AGV2实体
+     * @return 让行策略执行结果描述
+     */
     private String applyYieldStrategy(ConflictRecord conflict,
                                     Task task1, Task task2,
                                     Agv agv1, Agv agv2) {
@@ -502,6 +620,11 @@ public class ConflictDetectionService {
         log.info("AGV已暂停: {}", agv.getAgvNo());
     }
 
+    /**
+     * 解决所有未解决的冲突
+     * 按创建时间倒序遍历所有未解决的冲突记录，逐个调用resolveConflict方法解决，
+     * 最后释放所有过期的分布式锁，避免死锁发生
+     */
     public void resolveAllConflicts() {
         List<ConflictRecord> unresolved = conflictRecordRepository.findByResolvedFalseOrderByCreateTimeDesc();
         for (ConflictRecord conflict : unresolved) {
@@ -514,6 +637,11 @@ public class ConflictDetectionService {
         releaseExpiredLocks();
     }
 
+    /**
+     * 释放过期的分布式锁
+     * 遍历Redis中所有的节点锁和路口锁，检查锁的剩余生存时间（TTL），
+     * 清理已过期的锁（TTL <= 0），防止因异常导致的锁永久占用，避免死锁
+     */
     public void releaseExpiredLocks() {
         Set<String> nodeKeys = redisTemplate.keys(NODE_LOCK_PREFIX + "*");
         if (nodeKeys != null) {
@@ -576,6 +704,15 @@ public class ConflictDetectionService {
         return false;
     }
 
+    /**
+     * 尝试获取路口通行权
+     * AGV在通过路口前调用此方法尝试获取路口锁，获取成功则可以通过，
+     * 获取失败则设置等待关系，等待当前持有者通过后再尝试
+     *
+     * @param agvId AGV ID
+     * @param intersectionCode 路口节点编码
+     * @return 是否获得路口通行权
+     */
     @Transactional
     public boolean tryIntersectionPass(String agvId, String intersectionCode) {
         Agv agv = agvRepository.findById(agvId).orElse(null);
@@ -600,6 +737,14 @@ public class ConflictDetectionService {
         return false;
     }
 
+    /**
+     * 完成路口通行
+     * AGV通过路口后调用此方法释放路口锁，同时清除AGV的等待关系，
+     * 让其他等待的AGV可以继续尝试获取路口通行权
+     *
+     * @param agvId AGV ID
+     * @param intersectionCode 路口节点编码
+     */
     @Transactional
     public void completeIntersectionPass(String agvId, String intersectionCode) {
         pathPlanningService.unlockIntersection(intersectionCode, agvId);

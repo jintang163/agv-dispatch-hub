@@ -15,23 +15,68 @@ import java.util.concurrent.TimeUnit;
 
 import static com.agv.dispatch.common.constant.RedisKeyConstant.*;
 
+/**
+ * 路径规划服务
+ * 提供基于拓扑地图的路径规划功能，支持Dijkstra和A*算法，
+ * 包含节点锁管理、路口锁管理、路径阻塞管理等功能
+ *
+ * @author agv-dispatch
+ * @since 2026-06-06
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class PathPlanningService {
 
+    /**
+     * 地图节点数据访问层
+     */
     private final MapNodeRepository mapNodeRepository;
+
+    /**
+     * Redis模板，用于分布式锁和缓存
+     */
     private final StringRedisTemplate redisTemplate;
 
+    /**
+     * 拓扑图：节点编码 -> (相邻节点编码 -> 边权重)
+     */
     private final Map<String, Map<String, Double>> graph = new HashMap<>();
+
+    /**
+     * 节点缓存：节点编码 -> 节点实体
+     */
     private final Map<String, MapNode> nodeCache = new HashMap<>();
 
+    /**
+     * AGV默认行驶速度（米/秒）
+     */
     private static final double DEFAULT_AGV_SPEED = 1.0;
+
+    /**
+     * 路径占用惩罚系数，被占用的节点增加此权重
+     */
     private static final double OCCUPATION_PENALTY = 1000.0;
+
+    /**
+     * 路径阻塞惩罚系数，被阻塞的节点增加此权重（确保不选择）
+     */
     private static final double BLOCKED_PENALTY = 10000.0;
+
+    /**
+     * 路口惩罚系数，通过路口时增加此权重（鼓励少走路口）
+     */
     private static final double INTERSECTION_PENALTY = 50.0;
+
+    /**
+     * 最大重规划尝试次数
+     */
     private static final int MAX_REPLAN_ATTEMPTS = 3;
 
+    /**
+     * 初始化地图拓扑图
+     * 从数据库加载所有节点和连接关系，构建拓扑图和节点缓存
+     */
     public void initGraph() {
         List<MapNode> nodes = mapNodeRepository.findAll();
         graph.clear();
@@ -54,6 +99,15 @@ public class PathPlanningService {
         log.info("地图拓扑图初始化完成，节点数: {}", graph.size());
     }
 
+    /**
+     * 调整边权重
+     * 考虑路口惩罚和节点限速，计算调整后的边权重
+     *
+     * @param node1 起点节点
+     * @param node2 终点节点
+     * @param baseDistance 基础距离
+     * @return 调整后的权重
+     */
     private double adjustEdgeWeight(MapNode node1, MapNode node2, double baseDistance) {
         double weight = baseDistance;
         if (Boolean.TRUE.equals(node1.getIsIntersection()) || Boolean.TRUE.equals(node2.getIsIntersection())) {
@@ -68,10 +122,26 @@ public class PathPlanningService {
         return weight;
     }
 
+    /**
+     * 规划路径（默认使用A*算法）
+     *
+     * @param startPoint 起点节点编码
+     * @param endPoint 终点节点编码
+     * @return 路径节点列表
+     */
     public List<String> planPath(String startPoint, String endPoint) {
         return planPathWithAlgorithm(startPoint, endPoint, "A*").getPath();
     }
 
+    /**
+     * 使用指定算法规划路径
+     * 支持A*和Dijkstra算法，自动考虑节点占用和阻塞情况
+     *
+     * @param startPoint 起点节点编码
+     * @param endPoint 终点节点编码
+     * @param algorithm 算法类型：A* 或 DIJKSTRA
+     * @return 路径规划结果
+     */
     public PathPlanningResult planPathWithAlgorithm(String startPoint, String endPoint, String algorithm) {
         if (startPoint.equals(endPoint)) {
             return PathPlanningResult.success(Collections.singletonList(startPoint), 0, algorithm);
@@ -101,6 +171,14 @@ public class PathPlanningService {
         return PathPlanningResult.success(path, totalDistance, algorithm);
     }
 
+    /**
+     * Dijkstra最短路径算法
+     * 使用优先队列优化，考虑节点占用和阻塞惩罚
+     *
+     * @param startPoint 起点节点编码
+     * @param endPoint 终点节点编码
+     * @return 路径节点列表
+     */
     private List<String> dijkstra(String startPoint, String endPoint) {
         Map<String, Double> distances = new HashMap<>();
         Map<String, String> previous = new HashMap<>();
@@ -151,6 +229,15 @@ public class PathPlanningService {
         return reconstructPath(previous, startPoint, endPoint);
     }
 
+    /**
+     * A*启发式搜索算法
+     * 使用曼哈顿距离作为启发函数，结合实际代价和预估代价，
+     * 比Dijkstra算法更快找到最优路径
+     *
+     * @param startPoint 起点节点编码
+     * @param endPoint 终点节点编码
+     * @return 路径节点列表
+     */
     private List<String> astar(String startPoint, String endPoint) {
         Map<String, Double> gScore = new HashMap<>();
         Map<String, Double> fScore = new HashMap<>();
@@ -207,6 +294,14 @@ public class PathPlanningService {
         return Collections.emptyList();
     }
 
+    /**
+     * 启发函数（曼哈顿距离）
+     * 计算两个节点之间的直线距离，用于A*算法的预估代价
+     *
+     * @param nodeA 节点A编码
+     * @param nodeB 节点B编码
+     * @return 直线距离（米）
+     */
     private double heuristic(String nodeA, String nodeB) {
         MapNode n1 = nodeCache.get(nodeA);
         MapNode n2 = nodeCache.get(nodeB);
@@ -216,18 +311,41 @@ public class PathPlanningService {
         return calculateDistance(n1, n2);
     }
 
+    /**
+     * 获取节点占用惩罚
+     * 如果节点已被其他AGV占用，返回惩罚系数
+     *
+     * @param nodeCode 节点编码
+     * @return 惩罚系数
+     */
     private double getPathOccupationPenalty(String nodeCode) {
         String key = PATH_OCCUPY_PREFIX + nodeCode;
         Boolean occupied = redisTemplate.hasKey(key);
         return Boolean.TRUE.equals(occupied) ? OCCUPATION_PENALTY : 0.0;
     }
 
+    /**
+     * 获取节点阻塞惩罚
+     * 如果节点被标记为阻塞，返回惩罚系数（确保算法不选择该节点）
+     *
+     * @param nodeCode 节点编码
+     * @return 惩罚系数
+     */
     private double getBlockedPenalty(String nodeCode) {
         String key = PATH_BLOCKED_PREFIX + nodeCode;
         Boolean blocked = redisTemplate.hasKey(key);
         return Boolean.TRUE.equals(blocked) ? BLOCKED_PENALTY : 0.0;
     }
 
+    /**
+     * 绕行规划
+     * 规划路径时避开指定的节点，用于冲突解决时的重规划
+     *
+     * @param startPoint 起点节点编码
+     * @param endPoint 终点节点编码
+     * @param avoidNodes 需要避开的节点列表
+     * @return 路径规划结果
+     */
     public PathPlanningResult planPathWithDetour(String startPoint, String endPoint, Set<String> avoidNodes) {
         if (startPoint.equals(endPoint)) {
             return PathPlanningResult.success(Collections.singletonList(startPoint), 0, "A*-DETOUR");
@@ -292,6 +410,14 @@ public class PathPlanningService {
         return PathPlanningResult.failure("无法规划绕行路径，需避开节点: " + avoidNodes);
     }
 
+    /**
+     * 动态重规划任务路径
+     * 当路径被阻塞时，从任务当前位置重新规划路径，保留已走过的部分
+     *
+     * @param task 任务对象
+     * @param blockedNode 阻塞的节点编码
+     * @return 重规划结果
+     */
     public PathPlanningResult dynamicReplan(Task task, String blockedNode) {
         List<String> currentPath = decodePath(task.getPath());
         Integer currentStep = task.getCurrentStep();
@@ -333,6 +459,13 @@ public class PathPlanningService {
         return PathPlanningResult.failure("动态重规划失败，所有路径均被阻塞");
     }
 
+    /**
+     * 从当前位置重规划任务路径
+     * 不考虑阻塞，直接从任务当前执行位置重新规划最优路径
+     *
+     * @param task 任务对象
+     * @return 重规划结果
+     */
     public PathPlanningResult replanFromCurrentPosition(Task task) {
         List<String> currentPath = decodePath(task.getPath());
         Integer currentStep = task.getCurrentStep();
@@ -368,6 +501,14 @@ public class PathPlanningService {
                 .build();
     }
 
+    /**
+     * 尝试获取节点锁
+     * 使用Redis分布式锁实现节点预占，防止多个AGV同时占用同一节点
+     *
+     * @param nodeCode 节点编码
+     * @param agvId AGV ID
+     * @return 是否获取成功
+     */
     public boolean tryLockNode(String nodeCode, String agvId) {
         String key = NODE_LOCK_PREFIX + nodeCode;
         Boolean locked = redisTemplate.opsForValue()
@@ -378,6 +519,13 @@ public class PathPlanningService {
         return Boolean.TRUE.equals(locked);
     }
 
+    /**
+     * 释放节点锁
+     * 只有锁的持有者才能释放锁
+     *
+     * @param nodeCode 节点编码
+     * @param agvId AGV ID
+     */
     public void unlockNode(String nodeCode, String agvId) {
         String key = NODE_LOCK_PREFIX + nodeCode;
         String holder = redisTemplate.opsForValue().get(key);
@@ -387,6 +535,14 @@ public class PathPlanningService {
         }
     }
 
+    /**
+     * 尝试获取路口锁
+     * 用于路口会车协议，先到先得原则
+     *
+     * @param intersectionCode 路口节点编码
+     * @param agvId AGV ID
+     * @return 是否获取成功
+     */
     public boolean tryLockIntersection(String intersectionCode, String agvId) {
         String key = INTERSECTION_LOCK_PREFIX + intersectionCode;
         Boolean locked = redisTemplate.opsForValue()
@@ -397,6 +553,12 @@ public class PathPlanningService {
         return Boolean.TRUE.equals(locked);
     }
 
+    /**
+     * 释放路口锁
+     *
+     * @param intersectionCode 路口节点编码
+     * @param agvId AGV ID
+     */
     public void unlockIntersection(String intersectionCode, String agvId) {
         String key = INTERSECTION_LOCK_PREFIX + intersectionCode;
         String holder = redisTemplate.opsForValue().get(key);
@@ -406,22 +568,46 @@ public class PathPlanningService {
         }
     }
 
+    /**
+     * 检查节点是否被锁定
+     *
+     * @param nodeCode 节点编码
+     * @return 是否已锁定
+     */
     public boolean isNodeLocked(String nodeCode) {
         String key = NODE_LOCK_PREFIX + nodeCode;
         return Boolean.TRUE.equals(redisTemplate.hasKey(key));
     }
 
+    /**
+     * 获取节点锁的持有者
+     *
+     * @param nodeCode 节点编码
+     * @return 持有锁的AGV ID
+     */
     public String getNodeLockHolder(String nodeCode) {
         String key = NODE_LOCK_PREFIX + nodeCode;
         return redisTemplate.opsForValue().get(key);
     }
 
+    /**
+     * 标记节点为阻塞状态
+     * 路径规划时会自动避开阻塞节点
+     *
+     * @param nodeCode 节点编码
+     * @param reason 阻塞原因
+     */
     public void markPathBlocked(String nodeCode, String reason) {
         String key = PATH_BLOCKED_PREFIX + nodeCode;
         redisTemplate.opsForValue().set(key, reason, PATH_BLOCKED_SECONDS, TimeUnit.SECONDS);
         log.warn("节点 {} 被标记为阻塞: {}", nodeCode, reason);
     }
 
+    /**
+     * 清除节点阻塞标记
+     *
+     * @param nodeCode 节点编码
+     */
     public void clearPathBlocked(String nodeCode) {
         String key = PATH_BLOCKED_PREFIX + nodeCode;
         redisTemplate.delete(key);
@@ -449,16 +635,35 @@ public class PathPlanningService {
         return blocked;
     }
 
+    /**
+     * 设置AGV等待关系
+     * 记录agvId正在等待targetAgvId，用于死锁检测和冲突解决
+     *
+     * @param agvId 等待方AGV ID
+     * @param targetAgvId 被等待方AGV ID
+     */
     public void setAgvWaitingFor(String agvId, String targetAgvId) {
         String key = AGV_WAITING_FOR_PREFIX + agvId;
         redisTemplate.opsForValue().set(key, targetAgvId, WAITING_STATUS_SECONDS, TimeUnit.SECONDS);
     }
 
+    /**
+     * 获取AGV正在等待的目标AGV
+     *
+     * @param agvId AGV ID
+     * @return 被等待的目标AGV ID，如果不存在等待关系则返回null
+     */
     public String getAgvWaitingFor(String agvId) {
         String key = AGV_WAITING_FOR_PREFIX + agvId;
         return redisTemplate.opsForValue().get(key);
     }
 
+    /**
+     * 清除AGV等待关系
+     * 当AGV不再需要等待其他AGV时调用，移除等待关系记录
+     *
+     * @param agvId AGV ID
+     */
     public void clearAgvWaitingFor(String agvId) {
         String key = AGV_WAITING_FOR_PREFIX + agvId;
         redisTemplate.delete(key);
