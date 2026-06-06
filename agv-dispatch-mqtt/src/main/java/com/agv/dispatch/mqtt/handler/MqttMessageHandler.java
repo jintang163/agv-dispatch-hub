@@ -4,13 +4,16 @@ import com.agv.dispatch.common.constant.MqttTopicConstant;
 import com.agv.dispatch.common.dto.AgvStatusDTO;
 import com.agv.dispatch.common.dto.AgvStatusReportDTO;
 import com.agv.dispatch.common.dto.TaskCreateDTO;
+import com.agv.dispatch.common.dto.TaskExecutionFeedbackDTO;
 import com.agv.dispatch.common.entity.Agv;
 import com.agv.dispatch.common.enums.AgvStatus;
+import com.agv.dispatch.common.enums.AlarmType;
 import com.agv.dispatch.common.enums.TaskStatus;
 import com.agv.dispatch.common.util.IdGenerator;
 import com.agv.dispatch.core.repository.AgvRepository;
 import com.agv.dispatch.core.service.AgvStatusService;
 import com.agv.dispatch.core.service.TaskDispatchService;
+import com.agv.dispatch.core.service.TaskExecutionService;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import lombok.RequiredArgsConstructor;
@@ -26,12 +29,20 @@ import java.util.concurrent.TimeUnit;
 
 import static com.agv.dispatch.common.constant.RedisKeyConstant.*;
 
+/**
+ * MQTT消息处理器
+ * 接收并处理所有MQTT消息，包括AGV状态、任务反馈、心跳、故障、执行反馈、控制响应等
+ *
+ * @author agv-dispatch
+ * @since 2026-06-06
+ */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class MqttMessageHandler {
 
     private final TaskDispatchService taskDispatchService;
+    private final TaskExecutionService taskExecutionService;
     private final AgvStatusService agvStatusService;
     private final AgvRepository agvRepository;
     private final StringRedisTemplate redisTemplate;
@@ -56,6 +67,10 @@ public class MqttMessageHandler {
                 handleAgvStatus(topic, payload);
             } else if (topic.matches("agv/[^/]+/task/feedback")) {
                 handleTaskFeedback(topic, payload);
+            } else if (topic.matches("agv/[^/]+/execution/feedback")) {
+                handleExecutionFeedback(topic, payload);
+            } else if (topic.matches("agv/[^/]+/control/response")) {
+                handleControlResponse(topic, payload);
             } else if (topic.matches("agv/[^/]+/heartbeat")) {
                 handleHeartbeat(topic, payload);
             } else if (topic.matches("agv/[^/]+/fault")) {
@@ -221,6 +236,136 @@ public class MqttMessageHandler {
 
         } catch (Exception e) {
             log.error("处理WMS任务异常, payload={}", payload, e);
+        }
+    }
+
+    /**
+     * 处理AGV执行反馈消息
+     * 
+     * 业务逻辑：
+     * 1. 从topic中提取AGV编号
+     * 2. 解析payload为TaskExecutionFeedbackDTO
+     * 3. 补充agvNo字段（从topic获取的优先级高于payload中的）
+     * 4. 调用taskDispatchService.handleExecutionFeedback处理业务逻辑
+     * 5. 根据不同的action记录不同级别的日志
+     * 
+     * 支持的action类型：
+     * - START: AGV开始执行任务
+     * - PROGRESS: 执行进度更新
+     * - ARRIVED: 到达路径节点
+     * - WORKING: 作业中（装卸货等）
+     * - COMPLETE: 任务完成
+     * - ABNORMAL: 执行异常
+     * - PAUSE: 任务暂停
+     * - RESUME: 任务恢复
+     * 
+     * @param topic MQTT主题，格式：agv/{agvNo}/execution/feedback
+     * @param payload 消息内容，JSON格式的TaskExecutionFeedbackDTO
+     */
+    private void handleExecutionFeedback(String topic, String payload) {
+        try {
+            String agvNo = extractAgvNo(topic);
+            log.debug("收到AGV执行反馈: agvNo={}, payload={}", agvNo, payload);
+
+            TaskExecutionFeedbackDTO feedbackDTO = JSON.parseObject(payload, TaskExecutionFeedbackDTO.class);
+            if (feedbackDTO == null) {
+                log.error("执行反馈消息解析失败: {}", payload);
+                return;
+            }
+
+            if (feedbackDTO.getTaskId() == null || feedbackDTO.getTaskId().isEmpty()) {
+                log.error("执行反馈缺少taskId: {}", payload);
+                return;
+            }
+
+            if (feedbackDTO.getAction() == null || feedbackDTO.getAction().isEmpty()) {
+                log.error("执行反馈缺少action: {}", payload);
+                return;
+            }
+
+            feedbackDTO.setAgvNo(agvNo);
+
+            taskExecutionService.handleExecutionFeedback(feedbackDTO);
+
+            String action = feedbackDTO.getAction();
+            if ("COMPLETE".equals(action) || "ABNORMAL".equals(action)) {
+                log.info("任务执行反馈[{}]: taskId={}, agvNo={}, result={}",
+                        action, feedbackDTO.getTaskId(), agvNo, feedbackDTO.getResult());
+            } else if ("START".equals(action) || "PAUSE".equals(action) || "RESUME".equals(action)) {
+                log.info("任务状态变更[{}]: taskId={}, agvNo={}",
+                        action, feedbackDTO.getTaskId(), agvNo);
+            } else {
+                log.debug("任务执行进度[{}]: taskId={}, agvNo={}, step={}, progress={}%",
+                        action, feedbackDTO.getTaskId(), agvNo,
+                        feedbackDTO.getCurrentStep(), feedbackDTO.getProgress());
+            }
+
+        } catch (Exception e) {
+            log.error("处理AGV执行反馈异常, topic={}, payload={}", topic, payload, e);
+        }
+    }
+
+    /**
+     * 处理AGV控制响应消息
+     * 
+     * 业务逻辑：
+     * 1. 从topic中提取AGV编号
+     * 2. 解析payload获取控制命令执行结果
+     * 3. 记录控制命令执行日志
+     * 4. 如果控制失败，触发告警通知
+     * 
+     * 响应消息格式示例：
+     * {
+     *   "command": "PAUSE",
+     *   "success": true,
+     *   "message": "暂停成功",
+     *   "timestamp": "2026-06-06T10:05:30"
+     * }
+     * 
+     * @param topic MQTT主题，格式：agv/{agvNo}/control/response
+     * @param payload 消息内容，JSON格式的控制响应
+     */
+    private void handleControlResponse(String topic, String payload) {
+        try {
+            String agvNo = extractAgvNo(topic);
+            log.debug("收到AGV控制响应: agvNo={}, payload={}", agvNo, payload);
+
+            JSONObject response = JSON.parseObject(payload);
+            if (response == null) {
+                log.error("控制响应消息解析失败: {}", payload);
+                return;
+            }
+
+            String command = response.getString("command");
+            Boolean success = response.getBoolean("success");
+            String message = response.getString("message");
+            String errorCode = response.getString("errorCode");
+
+            if (success == null) {
+                success = true;
+            }
+
+            if (success) {
+                log.info("AGV控制命令执行成功: agvNo={}, command={}, message={}",
+                        agvNo, command, message);
+            } else {
+                log.error("AGV控制命令执行失败: agvNo={}, command={}, errorCode={}, message={}",
+                        agvNo, command, errorCode, message);
+
+                Agv agv = agvRepository.findByAgvNo(agvNo).orElse(null);
+                String agvId = agv != null ? agv.getId() : null;
+
+                taskExecutionService.createAlarm(
+                        AlarmType.COMMUNICATION_ERROR,
+                        null,
+                        agvId,
+                        null,
+                        String.format("命令: %s, 错误码: %s, 错误信息: %s",
+                                command, errorCode, message));
+            }
+
+        } catch (Exception e) {
+            log.error("处理AGV控制响应异常, topic={}, payload={}", topic, payload, e);
         }
     }
 

@@ -1,9 +1,12 @@
 package com.agv.dispatch.api.controller;
 
+import com.agv.dispatch.common.dto.AgvRemoteControlDTO;
 import com.agv.dispatch.common.dto.PathPlanningResult;
 import com.agv.dispatch.common.dto.Result;
+import com.agv.dispatch.common.entity.AlarmRecord;
 import com.agv.dispatch.common.entity.ConflictRecord;
 import com.agv.dispatch.common.entity.DeadlockRecord;
+import com.agv.dispatch.common.entity.Task;
 import com.agv.dispatch.core.service.ConflictDetectionService;
 import com.agv.dispatch.core.service.DeadlockDetectionService;
 import com.agv.dispatch.core.service.PathPlanningService;
@@ -11,6 +14,7 @@ import com.agv.dispatch.core.service.TaskDispatchService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -251,5 +255,165 @@ public class DispatchController {
             @Parameter(description = "节点编号") @PathVariable String nodeCode) {
         taskDispatchService.clearPathBlocked(nodeCode);
         return Result.success();
+    }
+
+    // ==================== 任务执行控制 ====================
+
+    /**
+     * 下发任务给AGV
+     * 将任务信息和路径点序列通过MQTT下发给指定AGV
+     *
+     * @param taskId 任务ID
+     * @return 下发是否成功
+     */
+    @PostMapping("/tasks/{taskId}/dispatch")
+    @Operation(summary = "下发任务", description = "将任务信息和路径点序列通过MQTT下发给AGV")
+    public Result<Boolean> dispatchTask(
+            @Parameter(description = "任务ID") @PathVariable String taskId) {
+        boolean success = taskDispatchService.dispatchTask(taskId);
+        return Result.success(success);
+    }
+
+    /**
+     * 暂停任务
+     * 发送暂停命令给AGV，更新任务状态
+     *
+     * @param taskId 任务ID
+     * @param operator 操作人
+     * @param reason 暂停原因
+     * @return 操作是否成功
+     */
+    @PostMapping("/tasks/{taskId}/pause")
+    @Operation(summary = "暂停任务", description = "发送暂停命令给AGV，暂停任务执行")
+    public Result<Boolean> pauseTask(
+            @Parameter(description = "任务ID") @PathVariable String taskId,
+            @Parameter(description = "操作人") @RequestParam(required = false, defaultValue = "admin") String operator,
+            @Parameter(description = "暂停原因") @RequestParam(required = false) String reason) {
+        boolean success = taskDispatchService.pauseTask(taskId, operator, reason);
+        return Result.success(success);
+    }
+
+    /**
+     * 恢复任务
+     * 发送恢复命令给AGV，继续任务执行
+     *
+     * @param taskId 任务ID
+     * @param operator 操作人
+     * @return 操作是否成功
+     */
+    @PostMapping("/tasks/{taskId}/resume")
+    @Operation(summary = "恢复任务", description = "发送恢复命令给AGV，继续任务执行")
+    public Result<Boolean> resumeTask(
+            @Parameter(description = "任务ID") @PathVariable String taskId,
+            @Parameter(description = "操作人") @RequestParam(required = false, defaultValue = "admin") String operator) {
+        boolean success = taskDispatchService.resumeTask(taskId, operator);
+        return Result.success(success);
+    }
+
+    /**
+     * 取消任务
+     * 发送取消命令给AGV，取消任务执行，释放资源
+     *
+     * @param taskId 任务ID
+     * @param operator 操作人
+     * @param reason 取消原因
+     * @return 操作是否成功
+     */
+    @PostMapping("/tasks/{taskId}/cancel")
+    @Operation(summary = "取消任务", description = "发送取消命令给AGV，取消任务执行，释放资源")
+    public Result<Boolean> cancelTask(
+            @Parameter(description = "任务ID") @PathVariable String taskId,
+            @Parameter(description = "操作人") @RequestParam(required = false, defaultValue = "admin") String operator,
+            @Parameter(description = "取消原因") @RequestParam(required = false) String reason) {
+        boolean success = taskDispatchService.cancelTask(taskId, operator, reason);
+        return Result.success(success);
+    }
+
+    /**
+     * 获取正在执行的任务列表
+     *
+     * @return 正在执行的任务列表
+     */
+    @GetMapping("/tasks/executing")
+    @Operation(summary = "获取执行中的任务", description = "获取所有正在执行的任务列表")
+    public Result<List<Task>> getExecutingTasks() {
+        List<Task> tasks = taskDispatchService.getExecutingTasks();
+        return Result.success(tasks);
+    }
+
+    /**
+     * 根据AGV编号获取当前任务
+     *
+     * @param agvNo AGV编号
+     * @return 当前任务
+     */
+    @GetMapping("/agvs/{agvNo}/current-task")
+    @Operation(summary = "获取AGV当前任务", description = "根据AGV编号获取当前正在执行的任务")
+    public Result<Task> getCurrentTaskByAgvNo(
+            @Parameter(description = "AGV编号") @PathVariable String agvNo) {
+        Task task = taskDispatchService.getCurrentTaskByAgvNo(agvNo);
+        return Result.success(task);
+    }
+
+    // ==================== AGV远程控制 ====================
+
+    /**
+     * 远程控制AGV
+     * 发送控制命令给指定AGV（暂停、恢复、急停、慢速、正常行驶、避障、充电、到指定点）
+     *
+     * @param controlDTO 控制参数
+     * @return 操作是否成功
+     */
+    @PostMapping("/agvs/control")
+    @Operation(summary = "远程控制AGV", description = "发送控制命令给指定AGV（暂停、恢复、急停、慢速、正常行驶、避障、充电、到指定点）")
+    public Result<Boolean> remoteControlAgv(
+            @Valid @RequestBody AgvRemoteControlDTO controlDTO) {
+        boolean success = taskDispatchService.remoteControlAgv(controlDTO);
+        return Result.success(success);
+    }
+
+    // ==================== 告警管理 ====================
+
+    /**
+     * 获取未处理的告警列表
+     *
+     * @return 未处理告警列表
+     */
+    @GetMapping("/alarms/unhandled")
+    @Operation(summary = "获取未处理告警", description = "获取所有未处理的告警列表，按时间倒序排列")
+    public Result<List<AlarmRecord>> getUnhandledAlarms() {
+        List<AlarmRecord> alarms = taskDispatchService.getUnhandledAlarms();
+        return Result.success(alarms);
+    }
+
+    /**
+     * 获取所有告警列表
+     *
+     * @return 告警列表
+     */
+    @GetMapping("/alarms")
+    @Operation(summary = "获取所有告警", description = "获取所有告警记录列表")
+    public Result<List<AlarmRecord>> getAllAlarms() {
+        List<AlarmRecord> alarms = taskDispatchService.getAllAlarms();
+        return Result.success(alarms);
+    }
+
+    /**
+     * 处理告警
+     * 标记告警为已处理，并记录处理结果
+     *
+     * @param alarmId 告警ID
+     * @param handleResult 处理结果
+     * @param handler 处理人
+     * @return 处理是否成功
+     */
+    @PostMapping("/alarms/{alarmId}/handle")
+    @Operation(summary = "处理告警", description = "标记告警为已处理，并记录处理结果")
+    public Result<Boolean> handleAlarm(
+            @Parameter(description = "告警ID") @PathVariable Long alarmId,
+            @Parameter(description = "处理结果") @RequestParam String handleResult,
+            @Parameter(description = "处理人") @RequestParam(required = false, defaultValue = "admin") String handler) {
+        boolean success = taskDispatchService.handleAlarm(alarmId, handleResult, handler);
+        return Result.success(success);
     }
 }

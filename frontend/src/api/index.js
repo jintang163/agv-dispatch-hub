@@ -50,25 +50,165 @@ export const agvApi = {
 }
 
 export const dispatchApi = {
-  // 冲突检测与解决
+  /**
+   * 检测所有AGV之间的冲突
+   * @returns 冲突列表
+   */
   detectConflicts: () => request.get('/dispatch/conflicts'),
+  /**
+   * 获取所有未解决的冲突
+   * @returns 未解决冲突列表
+   */
   getUnresolvedConflicts: () => request.get('/dispatch/conflicts/unresolved'),
+  /**
+   * 解决指定的冲突
+   * @param {number} id 冲突ID
+   * @returns 解决结果
+   */
   resolveConflict: (id) => request.post(`/dispatch/conflicts/${id}/resolve`),
+  /**
+   * 自动解决所有未解决的冲突
+   * @returns 解决结果
+   */
   resolveAllConflicts: () => request.post('/dispatch/conflicts/resolve-all'),
-  // 死锁检测与处理
+  /**
+   * 检测AGV死锁情况
+   * @returns 死锁列表
+   */
   detectDeadlocks: () => request.get('/dispatch/deadlocks/detect'),
+  /**
+   * 获取当前所有死锁
+   * @returns 死锁列表
+   */
   getCurrentDeadlocks: () => request.get('/dispatch/deadlocks'),
+  /**
+   * 解决指定的死锁
+   * @param {number} id 死锁ID
+   * @returns 解决结果
+   */
   resolveDeadlock: (id) => request.post(`/dispatch/deadlocks/${id}/resolve`),
+  /**
+   * 解决所有死锁
+   * @returns 解决结果
+   */
   resolveAllDeadlocks: () => request.post('/dispatch/deadlocks/resolve-all'),
-  // 动态重规划
+  /**
+   * 动态重规划任务路径（遇到阻塞时）
+   * @param {number} taskId 任务ID
+   * @param {string} blockedNode 阻塞节点
+   * @param {string} reason 重规划原因
+   * @param {string} operator 操作人
+   * @returns 重规划结果
+   */
   dynamicReplanTask: (taskId, blockedNode, reason, operator) => request.post(`/dispatch/tasks/${taskId}/dynamic-replan`, null, { params: { blockedNode, reason, operator } }),
+  /**
+   * 从当前位置重新规划任务路径
+   * @param {number} taskId 任务ID
+   * @param {string} operator 操作人
+   * @returns 重规划结果
+   */
   replanTaskFromCurrent: (taskId, operator) => request.post(`/dispatch/tasks/${taskId}/replan`, null, { params: { operator } }),
+  /**
+   * 处理路径阻塞事件
+   * @param {string} agvId AGV编号
+   * @param {string} blockedNode 阻塞节点
+   * @param {string} reason 阻塞原因
+   * @returns 处理结果
+   */
   handlePathBlocked: (agvId, blockedNode, reason) => request.post('/dispatch/path-blocked', null, { params: { agvId, blockedNode, reason } }),
-  // 状态查询
+  /**
+   * 标记路径节点为阻塞
+   * @param {string} nodeCode 节点编号
+   * @param {string} reason 阻塞原因
+   * @returns 标记结果
+   */
   markPathBlocked: (nodeCode, reason) => request.post(`/dispatch/blocked/${nodeCode}`, null, { params: { reason } }),
+  /**
+   * 清除路径节点的阻塞标记
+   * @param {string} nodeCode 节点编号
+   * @returns 清除结果
+   */
   clearPathBlocked: (nodeCode) => request.delete(`/dispatch/blocked/${nodeCode}`),
+  /**
+   * 获取所有阻塞的路径
+   * @returns 阻塞路径列表
+   */
   getBlockedPaths: () => request.get('/dispatch/blocked-paths'),
-  getLockedIntersections: () => request.get('/dispatch/locked-intersections')
+  /**
+   * 获取所有锁定的路口
+   * @returns 锁定路口列表
+   */
+  getLockedIntersections: () => request.get('/dispatch/locked-intersections'),
+  /**
+   * 下发任务，开始执行
+   * @param {number} taskId 任务ID
+   * @returns 下发结果
+   */
+  dispatchTask: (taskId) => request.post(`/dispatch/tasks/${taskId}/dispatch`),
+  /**
+   * 暂停执行中的任务
+   * @param {number} taskId 任务ID
+   * @param {string} operator 操作人
+   * @param {string} reason 暂停原因
+   * @returns 暂停结果
+   */
+  pauseTask: (taskId, operator, reason) => request.post(`/dispatch/tasks/${taskId}/pause`, null, { params: { operator, reason } }),
+  /**
+   * 恢复已暂停的任务
+   * @param {number} taskId 任务ID
+   * @param {string} operator 操作人
+   * @returns 恢复结果
+   */
+  resumeTask: (taskId, operator) => request.post(`/dispatch/tasks/${taskId}/resume`, null, { params: { operator } }),
+  /**
+   * 取消任务
+   * @param {number} taskId 任务ID
+   * @param {string} operator 操作人
+   * @param {string} reason 取消原因
+   * @returns 取消结果
+   */
+  cancelTask: (taskId, operator, reason) => request.post(`/dispatch/tasks/${taskId}/cancel`, null, { params: { operator, reason } }),
+  /**
+   * 获取所有正在执行的任务
+   * @returns 执行中任务列表
+   */
+  getExecutingTasks: () => request.get('/dispatch/tasks/executing'),
+  /**
+   * 根据AGV编号获取其当前执行的任务
+   * @param {string} agvNo AGV编号
+   * @returns 当前任务信息
+   */
+  getCurrentTaskByAgvNo: (agvNo) => request.get(`/dispatch/agvs/${agvNo}/current-task`),
+  /**
+   * 远程控制AGV
+   * @param {Object} controlDTO 控制命令DTO
+   * @param {string} controlDTO.agvNo AGV编号
+   * @param {string} controlDTO.command 控制命令
+   * @param {string} [controlDTO.targetPoint] 目标点（GO_TO_POINT时需要）
+   * @param {number} [controlDTO.speed] 速度（SLOW_DOWN/NORMAL_SPEED时需要）
+   * @param {string} controlDTO.reason 控制原因
+   * @param {string} controlDTO.operator 操作人
+   * @returns 控制结果
+   */
+  remoteControlAgv: (controlDTO) => request.post('/dispatch/agvs/control', controlDTO),
+  /**
+   * 获取所有未处理的告警
+   * @returns 未处理告警列表
+   */
+  getUnhandledAlarms: () => request.get('/dispatch/alarms/unhandled'),
+  /**
+   * 获取所有告警记录
+   * @returns 告警列表
+   */
+  getAllAlarms: () => request.get('/dispatch/alarms'),
+  /**
+   * 处理告警
+   * @param {number} alarmId 告警ID
+   * @param {string} handleResult 处理结果
+   * @param {string} handler 处理人
+   * @returns 处理结果
+   */
+  handleAlarm: (alarmId, handleResult, handler) => request.post(`/dispatch/alarms/${alarmId}/handle`, null, { params: { handleResult, handler } })
 }
 
 export const pathPlanningApi = {

@@ -8,6 +8,7 @@ public enum TaskStatus {
     PENDING(0, "待分配"),
     ASSIGNED(1, "已分配"),
     EXECUTING(2, "执行中"),
+    PAUSED(6, "已暂停"),
     COMPLETED(3, "完成"),
     CANCELLED(4, "取消"),
     ABNORMAL(5, "异常");
@@ -32,8 +33,9 @@ public enum TaskStatus {
     public boolean canTransitionTo(TaskStatus newStatus) {
         return switch (this) {
             case PENDING -> newStatus == ASSIGNED || newStatus == CANCELLED;
-            case ASSIGNED -> newStatus == EXECUTING || newStatus == CANCELLED || newStatus == PENDING;
-            case EXECUTING -> newStatus == COMPLETED || newStatus == ABNORMAL || newStatus == CANCELLED;
+            case ASSIGNED -> newStatus == EXECUTING || newStatus == CANCELLED || newStatus == PENDING || newStatus == PAUSED;
+            case EXECUTING -> newStatus == COMPLETED || newStatus == ABNORMAL || newStatus == CANCELLED || newStatus == PAUSED;
+            case PAUSED -> newStatus == EXECUTING || newStatus == CANCELLED || newStatus == PENDING;
             case ABNORMAL -> newStatus == PENDING || newStatus == CANCELLED;
             default -> false;
         };

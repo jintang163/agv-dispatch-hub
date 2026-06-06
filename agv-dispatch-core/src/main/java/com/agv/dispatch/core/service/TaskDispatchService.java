@@ -2,10 +2,12 @@ package com.agv.dispatch.core.service;
 
 import com.agv.dispatch.common.dto.*;
 import com.agv.dispatch.common.entity.Agv;
+import com.agv.dispatch.common.entity.AlarmRecord;
 import com.agv.dispatch.common.entity.MapNode;
 import com.agv.dispatch.common.entity.Task;
 import com.agv.dispatch.common.entity.TaskLog;
 import com.agv.dispatch.common.enums.AgvStatus;
+import com.agv.dispatch.common.enums.AlarmType;
 import com.agv.dispatch.common.enums.TaskPriority;
 import com.agv.dispatch.common.enums.TaskStatus;
 import com.agv.dispatch.common.enums.TaskType;
@@ -56,10 +58,12 @@ public class TaskDispatchService {
     private final TaskLogRepository taskLogRepository;
     private final MapNodeRepository mapNodeRepository;
     private final ConflictRecordRepository conflictRecordRepository;
+    private final AlarmRecordRepository alarmRecordRepository;
     private final PathPlanningService pathPlanningService;
     private final ConflictDetectionService conflictDetectionService;
     @org.springframework.context.annotation.Lazy
     private final DeadlockDetectionService deadlockDetectionService;
+    private final TaskExecutionService taskExecutionService;
     private final StringRedisTemplate redisTemplate;
 
     private final TaskQueueComparator taskQueueComparator = new TaskQueueComparator();
@@ -461,6 +465,16 @@ public class TaskDispatchService {
                     agvRepository.save(agv);
                 }
                 pathPlanningService.releaseAllPath(task.getAgvId());
+            }
+        } else if (newStatus == TaskStatus.PAUSED) {
+            // 任务暂停，记录暂停时间并更新AGV状态
+            task.setPausedTime(LocalDateTime.now());
+            if (task.getAgvId() != null) {
+                Agv agv = agvRepository.findById(task.getAgvId()).orElse(null);
+                if (agv != null && agv.getStatus() == AgvStatus.WORKING) {
+                    agv.setStatus(AgvStatus.PAUSED);
+                    agvRepository.save(agv);
+                }
             }
         } else if (newStatus == TaskStatus.PENDING && task.getAgvId() != null) {
             // 回到待分配状态（如重分配时），释放AGV和路径
@@ -1045,5 +1059,287 @@ public class TaskDispatchService {
 
     public void forceResolveAllDeadlocks() {
         deadlockDetectionService.resolveAllDeadlocks();
+    }
+
+    /**
+     * 处理AGV任务执行反馈
+     * 根据AGV上报的执行反馈消息，根据不同的action执行相应的业务逻辑
+     * 
+     * 业务逻辑：
+     * 1. START - AGV开始执行任务 -> 更新任务状态为EXECUTING
+     * 2. PROGRESS - 执行进度更新 -> 更新任务进度信息
+     * 3. ARRIVED - 到达路径节点 -> 更新当前步骤和位置
+     * 4. WORKING - 作业中（装卸货等 -> 记录作业日志
+     * 5. COMPLETE - 任务完成 -> 更新任务状态为COMPLETED
+     * 6. ABNORMAL - 执行异常 -> 更新任务状态为ABNORMAL，触发告警
+     * 7. PAUSE - 任务暂停 -> 更新任务状态为PAUSED
+     * 8. RESUME - 任务恢复 -> 更新任务状态为EXECUTING
+     * 
+     * @param feedbackDTO 执行反馈DTO，包含任务ID、动作类型、进度信息等
+     */
+    @Transactional
+    public void handleExecutionFeedback(TaskExecutionFeedbackDTO feedbackDTO) {
+        String taskId = feedbackDTO.getTaskId();
+        String agvNo = feedbackDTO.getAgvNo();
+        String action = feedbackDTO.getAction();
+
+        log.info("处理任务执行反馈: taskId={}, agvNo={}, action={}", taskId, agvNo, action);
+
+        try {
+            Task task = getTaskById(taskId);
+            String agvId = task.getAgvId();
+
+            switch (action) {
+                case "START":
+                    updateTaskStatus(taskId, TaskStatus.EXECUTING,
+                            "AGV开始执行任务", "mqtt:" + agvNo);
+                    break;
+
+                case "PROGRESS":
+                    if (feedbackDTO.getCurrentStep() != null && feedbackDTO.getCurrentNode() != null) {
+                        updateTaskProgress(taskId, feedbackDTO.getCurrentStep(), feedbackDTO.getCurrentNode());
+                    }
+                    if (feedbackDTO.getProgress() != null) {
+                        task.setProgress(feedbackDTO.getProgress());
+                        taskRepository.save(task);
+                        cacheTask(task);
+                    }
+                    break;
+
+                case "ARRIVED":
+                    String arrivedNode = feedbackDTO.getArrivedNode() != null ?
+                            feedbackDTO.getArrivedNode() : feedbackDTO.getCurrentNode();
+                    if (arrivedNode != null) {
+                        updateTaskProgress(taskId,
+                                feedbackDTO.getCurrentStep() != null ? feedbackDTO.getCurrentStep() : 0,
+                                arrivedNode);
+                    }
+                    break;
+
+                case "WORKING":
+                    recordTaskLog(taskId, agvId, "作业中",
+                            task.getStatus().getDesc(), task.getStatus().getDesc(),
+                            "AGV到达目标点，开始作业", "mqtt:" + agvNo);
+                    break;
+
+                case "COMPLETE":
+                    String result = feedbackDTO.getResult();
+                    if ("FAILED".equals(result)) {
+                        updateTaskStatus(taskId, TaskStatus.ABNORMAL,
+                                feedbackDTO.getErrorMessage() != null ? feedbackDTO.getErrorMessage() : "AGV执行失败",
+                                "mqtt:" + agvNo);
+                        createAlarm(AlarmType.TASK_FAILED, "任务执行失败",
+                                feedbackDTO.getErrorMessage(), agvId, taskId, null);
+                    } else {
+                        updateTaskStatus(taskId, TaskStatus.COMPLETED,
+                                "AGV完成任务", "mqtt:" + agvNo);
+                    }
+                    break;
+
+                case "ABNORMAL":
+                    updateTaskStatus(taskId, TaskStatus.ABNORMAL,
+                            feedbackDTO.getErrorMessage() != null ?
+                                    feedbackDTO.getErrorMessage() : "AGV上报异常",
+                            "mqtt:" + agvNo);
+                    createAlarm(AlarmType.TASK_FAILED, "任务执行异常",
+                            feedbackDTO.getErrorMessage(), agvId, taskId, null);
+                    break;
+
+                case "PAUSE":
+                    if (task.getStatus() == TaskStatus.EXECUTING || task.getStatus() == TaskStatus.ASSIGNED) {
+                        task.setStatus(TaskStatus.PAUSED);
+                        taskRepository.save(task);
+                        recordTaskLog(taskId, agvId, "任务暂停",
+                                task.getStatus().getDesc(), TaskStatus.PAUSED.getDesc(),
+                                feedbackDTO.getErrorMessage() != null ? feedbackDTO.getErrorMessage() : "AGV暂停任务",
+                                "mqtt:" + agvNo);
+                        cacheTask(task);
+                        log.info("任务已暂停: taskId={}", taskId);
+                    }
+                    break;
+
+                case "RESUME":
+                    if (task.getStatus() == TaskStatus.PAUSED) {
+                        updateTaskStatus(taskId, TaskStatus.EXECUTING,
+                                "AGV恢复任务恢复执行", "mqtt:" + agvNo);
+                    }
+                    break;
+
+                default:
+                    log.warn("未处理的执行反馈动作: {}", action);
+            }
+
+            log.debug("任务执行反馈处理完成: taskId={}, action={}", taskId, action);
+
+        } catch (Exception e) {
+            log.error("处理任务执行反馈异常: taskId={}, action={}", taskId, action, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 创建告警记录
+     * 
+     * @param alarmType 告警类型
+     * @param title 告警标题
+     * @param description 告警详情描述
+     * @param agvId 关联的AGV ID（可为null）
+     * @param taskId 关联的任务ID（可为null）
+     * @param nodeCode 关联的节点编号（可为null）
+     */
+    @Transactional
+    public void createAlarm(AlarmType alarmType, String title, String description,
+                         String agvId, String taskId, String nodeCode) {
+        AlarmRecord alarm = new AlarmRecord();
+        alarm.setAlarmType(alarmType);
+        alarm.setAlarmLevel(alarmType.getLevel());
+        alarm.setTitle(title);
+        alarm.setDescription(description);
+        alarm.setAgvId(agvId);
+        alarm.setTaskId(taskId);
+        alarm.setNodeCode(nodeCode);
+        alarm.setHandled(false);
+        alarmRecordRepository.save(alarm);
+
+        log.warn("创建告警: type={}, level={}, title={}, agvId={}, taskId={}",
+                alarmType, alarmType.getLevel(), title, agvId, taskId);
+    }
+
+    // ==================== 任务执行控制 ====================
+
+    /**
+     * 下发任务给AGV
+     * 任务分配后，将任务信息和路径点序列通过MQTT下发给AGV
+     *
+     * @param taskId 任务ID
+     * @return 下发是否成功
+     */
+    @Transactional
+    public boolean dispatchTask(String taskId) {
+        Task task = getTaskById(taskId);
+        return taskExecutionService.dispatchTask(task);
+    }
+
+    /**
+     * 暂停任务
+     * 发送暂停命令给AGV，更新任务状态
+     *
+     * @param taskId 任务ID
+     * @param operator 操作人
+     * @param reason 暂停原因
+     * @return 操作是否成功
+     */
+    @Transactional
+    public boolean pauseTask(String taskId, String operator, String reason) {
+        return taskExecutionService.pauseTask(taskId, operator, reason);
+    }
+
+    /**
+     * 恢复任务
+     * 发送恢复命令给AGV，更新任务状态
+     *
+     * @param taskId 任务ID
+     * @param operator 操作人
+     * @return 操作是否成功
+     */
+    @Transactional
+    public boolean resumeTask(String taskId, String operator) {
+        return taskExecutionService.resumeTask(taskId, operator);
+    }
+
+    /**
+     * 取消任务
+     * 发送取消命令给AGV，更新任务状态，释放资源
+     *
+     * @param taskId 任务ID
+     * @param operator 操作人
+     * @param reason 取消原因
+     * @return 操作是否成功
+     */
+    @Transactional
+    public boolean cancelTask(String taskId, String operator, String reason) {
+        return taskExecutionService.cancelTask(taskId, operator, reason);
+    }
+
+    /**
+     * 远程控制AGV
+     * 发送控制命令给指定AGV
+     *
+     * @param controlDTO 控制参数DTO
+     * @return 操作是否成功
+     */
+    public boolean remoteControlAgv(AgvRemoteControlDTO controlDTO) {
+        return taskExecutionService.remoteControlAgv(controlDTO);
+    }
+
+    /**
+     * 获取正在执行的任务列表
+     *
+     * @return 正在执行的任务列表
+     */
+    public List<Task> getExecutingTasks() {
+        return taskExecutionService.getExecutingTasks();
+    }
+
+    /**
+     * 根据AGV编号获取当前任务
+     *
+     * @param agvNo AGV编号
+     * @return 当前任务
+     */
+    public Task getCurrentTaskByAgvNo(String agvNo) {
+        return taskExecutionService.getCurrentTaskByAgvNo(agvNo);
+    }
+
+    // ==================== 告警管理 ====================
+
+    /**
+     * 获取未处理的告警列表
+     *
+     * @return 未处理告警列表
+     */
+    public List<AlarmRecord> getUnhandledAlarms() {
+        return taskExecutionService.getUnhandledAlarms();
+    }
+
+    /**
+     * 获取所有告警列表
+     *
+     * @return 告警列表
+     */
+    public List<AlarmRecord> getAllAlarms() {
+        return taskExecutionService.getAllAlarms();
+    }
+
+    /**
+     * 处理告警
+     *
+     * @param alarmId 告警ID
+     * @param handleResult 处理结果
+     * @param handler 处理人
+     * @return 是否处理成功
+     */
+    @Transactional
+    public boolean handleAlarm(Long alarmId, String handleResult, String handler) {
+        return taskExecutionService.handleAlarm(alarmId, handleResult, handler);
+    }
+
+    // ==================== 增强现有方法集成下发任务 ====================
+
+    /**
+     * 在任务分配成功后自动下发任务
+     * 在 assignTask 方法中，任务分配成功后调用此方法下发任务给 AGV
+     *
+     * @param task 已分配的任务
+     */
+    public void dispatchTaskAfterAssign(Task task) {
+        try {
+            taskExecutionService.dispatchTask(task);
+        } catch (Exception e) {
+            log.error("任务分配成功但下发失败: taskId={}", task.getId(), e);
+            createAlarm(AlarmType.COMMUNICATION_ERROR, "任务下发失败",
+                    "任务分配成功但下发给AGV失败: " + e.getMessage(),
+                    task.getAgvId(), task.getId(), null);
+        }
     }
 }

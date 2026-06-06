@@ -19,6 +19,15 @@ public interface TaskRepository extends JpaRepository<Task, String> {
 
     List<Task> findByStatus(TaskStatus status);
 
+    /**
+     * 查询指定状态范围内且已分配AGV的任务
+     * 用于获取正在执行的任务列表
+     *
+     * @param statuses 任务状态列表
+     * @return 符合条件的任务列表
+     */
+    List<Task> findByStatusInAndAgvIdIsNotNull(List<TaskStatus> statuses);
+
     List<Task> findByAgvIdAndStatusIn(String agvId, List<TaskStatus> statuses);
 
     List<Task> findByStatusOrderByPriorityCodeDescDeadlineAsc(TaskStatus status);
