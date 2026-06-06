@@ -35,6 +35,16 @@ public class MapNode {
 
     private Boolean isTransferStation;
 
+    private Boolean isIntersection;
+
+    private Boolean isPassage;
+
+    private Boolean isCriticalPoint;
+
+    private Integer passageCapacity;
+
+    private Double speedLimit;
+
     @Column(length = 128)
     private String connectedNodes;
 

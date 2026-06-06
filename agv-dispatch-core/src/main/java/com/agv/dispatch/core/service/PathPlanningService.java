@@ -1,5 +1,6 @@
 package com.agv.dispatch.core.service;
 
+import com.agv.dispatch.common.dto.PathPlanningResult;
 import com.agv.dispatch.common.entity.MapNode;
 import com.agv.dispatch.common.entity.Task;
 import com.agv.dispatch.core.repository.MapNodeRepository;
@@ -12,24 +13,8 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-import static com.agv.dispatch.common.constant.RedisKeyConstant.PATH_OCCUPY_PREFIX;
-import static com.agv.dispatch.common.constant.RedisKeyConstant.PATH_OCCUPY_SECONDS;
+import static com.agv.dispatch.common.constant.RedisKeyConstant.*;
 
-/**
- * 路径规划服务
- * 基于Dijkstra算法实现最短路径规划
- * 核心功能：
- * - 地图拓扑图初始化与维护
- * - 考虑路径占用的动态路径规划
- * - 路径占用与释放管理（前瞻3步）
- * - 路径编码与解码
- * - 路径可用性检测
- *
- * 路径占用机制：
- * - AGV执行任务时，占用当前位置及前瞻3步的节点
- * - 已走过的节点自动释放
- * - 其他AGV规划路径时会避开已占用节点
- */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -39,23 +24,28 @@ public class PathPlanningService {
     private final StringRedisTemplate redisTemplate;
 
     private final Map<String, Map<String, Double>> graph = new HashMap<>();
+    private final Map<String, MapNode> nodeCache = new HashMap<>();
 
-    /**
-     * 初始化地图拓扑图
-     * 从数据库加载所有地图节点及其连接关系，构建邻接表
-     * 系统启动或地图变更时调用
-     */
+    private static final double DEFAULT_AGV_SPEED = 1.0;
+    private static final double OCCUPATION_PENALTY = 1000.0;
+    private static final double BLOCKED_PENALTY = 10000.0;
+    private static final double INTERSECTION_PENALTY = 50.0;
+    private static final int MAX_REPLAN_ATTEMPTS = 3;
+
     public void initGraph() {
         List<MapNode> nodes = mapNodeRepository.findAll();
         graph.clear();
+        nodeCache.clear();
         for (MapNode node : nodes) {
+            nodeCache.put(node.getNodeCode(), node);
             Map<String, Double> neighbors = new HashMap<>();
             if (node.getConnectedNodes() != null && !node.getConnectedNodes().isEmpty()) {
                 String[] connected = node.getConnectedNodes().split(",");
                 for (String neighborCode : connected) {
                     mapNodeRepository.findByNodeCode(neighborCode.trim()).ifPresent(neighbor -> {
                         double distance = calculateDistance(node, neighbor);
-                        neighbors.put(neighborCode.trim(), distance);
+                        double adjustedWeight = adjustEdgeWeight(node, neighbor, distance);
+                        neighbors.put(neighborCode.trim(), adjustedWeight);
                     });
                 }
             }
@@ -64,23 +54,54 @@ public class PathPlanningService {
         log.info("地图拓扑图初始化完成，节点数: {}", graph.size());
     }
 
-    /**
-     * 规划从起点到终点的最优路径
-     * 使用Dijkstra算法，考虑路径占用惩罚
-     * 已被其他AGV占用的节点会增加代价，尽量避开冲突
-     *
-     * @param startPoint 起点节点编号
-     * @param endPoint 终点节点编号
-     * @return 路径节点列表，如果无法规划返回空列表
-     */
+    private double adjustEdgeWeight(MapNode node1, MapNode node2, double baseDistance) {
+        double weight = baseDistance;
+        if (Boolean.TRUE.equals(node1.getIsIntersection()) || Boolean.TRUE.equals(node2.getIsIntersection())) {
+            weight += INTERSECTION_PENALTY;
+        }
+        if (node1.getSpeedLimit() != null && node1.getSpeedLimit() > 0) {
+            weight *= (DEFAULT_AGV_SPEED / node1.getSpeedLimit());
+        }
+        if (node2.getSpeedLimit() != null && node2.getSpeedLimit() > 0) {
+            weight *= (DEFAULT_AGV_SPEED / node2.getSpeedLimit());
+        }
+        return weight;
+    }
+
     public List<String> planPath(String startPoint, String endPoint) {
+        return planPathWithAlgorithm(startPoint, endPoint, "A*").getPath();
+    }
+
+    public PathPlanningResult planPathWithAlgorithm(String startPoint, String endPoint, String algorithm) {
         if (startPoint.equals(endPoint)) {
-            return Collections.singletonList(startPoint);
+            return PathPlanningResult.success(Collections.singletonList(startPoint), 0, algorithm);
         }
         if (graph.isEmpty()) {
             initGraph();
         }
 
+        List<String> path;
+        switch (algorithm.toUpperCase()) {
+            case "ASTAR":
+            case "A*":
+                path = astar(startPoint, endPoint);
+                break;
+            case "DIJKSTRA":
+                path = dijkstra(startPoint, endPoint);
+                break;
+            default:
+                path = astar(startPoint, endPoint);
+        }
+
+        if (path.isEmpty()) {
+            return PathPlanningResult.failure("无法规划路径，起点: " + startPoint + ", 终点: " + endPoint);
+        }
+
+        double totalDistance = calculatePathDistance(path);
+        return PathPlanningResult.success(path, totalDistance, algorithm);
+    }
+
+    private List<String> dijkstra(String startPoint, String endPoint) {
         Map<String, Double> distances = new HashMap<>();
         Map<String, String> previous = new HashMap<>();
         PriorityQueue<Map.Entry<String, Double>> pq = new PriorityQueue<>(
@@ -116,7 +137,8 @@ public class PathPlanningService {
 
                 double edgeWeight = neighbor.getValue();
                 double occupationPenalty = getPathOccupationPenalty(nextNode);
-                double newDist = distances.get(currentNode) + edgeWeight + occupationPenalty;
+                double blockedPenalty = getBlockedPenalty(nextNode);
+                double newDist = distances.get(currentNode) + edgeWeight + occupationPenalty + blockedPenalty;
 
                 if (newDist < distances.getOrDefault(nextNode, Double.MAX_VALUE)) {
                     distances.put(nextNode, newDist);
@@ -129,21 +151,361 @@ public class PathPlanningService {
         return reconstructPath(previous, startPoint, endPoint);
     }
 
-    /**
-     * 获取节点的占用惩罚值
-     * 已被占用的节点增加100的代价，让规划算法尽量避开
-     *
-     * @param nodeCode 节点编号
-     * @return 占用惩罚值，已占用返回100，未占用返回0
-     */
+    private List<String> astar(String startPoint, String endPoint) {
+        Map<String, Double> gScore = new HashMap<>();
+        Map<String, Double> fScore = new HashMap<>();
+        Map<String, String> previous = new HashMap<>();
+
+        for (String node : graph.keySet()) {
+            gScore.put(node, Double.MAX_VALUE);
+            fScore.put(node, Double.MAX_VALUE);
+        }
+        gScore.put(startPoint, 0.0);
+        fScore.put(startPoint, heuristic(startPoint, endPoint));
+
+        PriorityQueue<Map.Entry<String, Double>> openSet = new PriorityQueue<>(
+                Map.Entry.comparingByValue());
+        openSet.add(new AbstractMap.SimpleEntry<>(startPoint, fScore.get(startPoint)));
+
+        Set<String> closedSet = new HashSet<>();
+
+        while (!openSet.isEmpty()) {
+            Map.Entry<String, Double> current = openSet.poll();
+            String currentNode = current.getKey();
+
+            if (currentNode.equals(endPoint)) {
+                return reconstructPath(previous, startPoint, endPoint);
+            }
+
+            if (closedSet.contains(currentNode)) {
+                continue;
+            }
+            closedSet.add(currentNode);
+
+            Map<String, Double> neighbors = graph.getOrDefault(currentNode, Collections.emptyMap());
+            for (Map.Entry<String, Double> neighbor : neighbors.entrySet()) {
+                String nextNode = neighbor.getKey();
+                if (closedSet.contains(nextNode)) {
+                    continue;
+                }
+
+                double edgeWeight = neighbor.getValue();
+                double occupationPenalty = getPathOccupationPenalty(nextNode);
+                double blockedPenalty = getBlockedPenalty(nextNode);
+                double tentativeG = gScore.get(currentNode) + edgeWeight + occupationPenalty + blockedPenalty;
+
+                if (tentativeG < gScore.getOrDefault(nextNode, Double.MAX_VALUE)) {
+                    previous.put(nextNode, currentNode);
+                    gScore.put(nextNode, tentativeG);
+                    double f = tentativeG + heuristic(nextNode, endPoint);
+                    fScore.put(nextNode, f);
+                    openSet.add(new AbstractMap.SimpleEntry<>(nextNode, f));
+                }
+            }
+        }
+
+        return Collections.emptyList();
+    }
+
+    private double heuristic(String nodeA, String nodeB) {
+        MapNode n1 = nodeCache.get(nodeA);
+        MapNode n2 = nodeCache.get(nodeB);
+        if (n1 == null || n2 == null) {
+            return 0;
+        }
+        return calculateDistance(n1, n2);
+    }
+
     private double getPathOccupationPenalty(String nodeCode) {
         String key = PATH_OCCUPY_PREFIX + nodeCode;
         Boolean occupied = redisTemplate.hasKey(key);
-        return Boolean.TRUE.equals(occupied) ? 100.0 : 0.0;
+        return Boolean.TRUE.equals(occupied) ? OCCUPATION_PENALTY : 0.0;
     }
 
-    private List<String> reconstructPath(Map<String, String> previous,
-                                         String start, String end) {
+    private double getBlockedPenalty(String nodeCode) {
+        String key = PATH_BLOCKED_PREFIX + nodeCode;
+        Boolean blocked = redisTemplate.hasKey(key);
+        return Boolean.TRUE.equals(blocked) ? BLOCKED_PENALTY : 0.0;
+    }
+
+    public PathPlanningResult planPathWithDetour(String startPoint, String endPoint, Set<String> avoidNodes) {
+        if (startPoint.equals(endPoint)) {
+            return PathPlanningResult.success(Collections.singletonList(startPoint), 0, "A*-DETOUR");
+        }
+        if (graph.isEmpty()) {
+            initGraph();
+        }
+
+        Map<String, Double> gScore = new HashMap<>();
+        Map<String, Double> fScore = new HashMap<>();
+        Map<String, String> previous = new HashMap<>();
+
+        for (String node : graph.keySet()) {
+            gScore.put(node, Double.MAX_VALUE);
+            fScore.put(node, Double.MAX_VALUE);
+        }
+        gScore.put(startPoint, 0.0);
+        fScore.put(startPoint, heuristic(startPoint, endPoint));
+
+        PriorityQueue<Map.Entry<String, Double>> openSet = new PriorityQueue<>(
+                Map.Entry.comparingByValue());
+        openSet.add(new AbstractMap.SimpleEntry<>(startPoint, fScore.get(startPoint)));
+
+        Set<String> closedSet = new HashSet<>();
+
+        while (!openSet.isEmpty()) {
+            Map.Entry<String, Double> current = openSet.poll();
+            String currentNode = current.getKey();
+
+            if (currentNode.equals(endPoint)) {
+                List<String> path = reconstructPath(previous, startPoint, endPoint);
+                double distance = calculatePathDistance(path);
+                return PathPlanningResult.detour(path, distance, avoidNodes.toString(), "A*-DETOUR");
+            }
+
+            if (closedSet.contains(currentNode)) {
+                continue;
+            }
+            closedSet.add(currentNode);
+
+            Map<String, Double> neighbors = graph.getOrDefault(currentNode, Collections.emptyMap());
+            for (Map.Entry<String, Double> neighbor : neighbors.entrySet()) {
+                String nextNode = neighbor.getKey();
+                if (closedSet.contains(nextNode) || avoidNodes.contains(nextNode)) {
+                    continue;
+                }
+
+                double edgeWeight = neighbor.getValue();
+                double occupationPenalty = getPathOccupationPenalty(nextNode);
+                double tentativeG = gScore.get(currentNode) + edgeWeight + occupationPenalty;
+
+                if (tentativeG < gScore.getOrDefault(nextNode, Double.MAX_VALUE)) {
+                    previous.put(nextNode, currentNode);
+                    gScore.put(nextNode, tentativeG);
+                    double f = tentativeG + heuristic(nextNode, endPoint);
+                    fScore.put(nextNode, f);
+                    openSet.add(new AbstractMap.SimpleEntry<>(nextNode, f));
+                }
+            }
+        }
+
+        return PathPlanningResult.failure("无法规划绕行路径，需避开节点: " + avoidNodes);
+    }
+
+    public PathPlanningResult dynamicReplan(Task task, String blockedNode) {
+        List<String> currentPath = decodePath(task.getPath());
+        Integer currentStep = task.getCurrentStep();
+        if (currentStep == null) {
+            currentStep = 0;
+        }
+
+        if (currentStep >= currentPath.size() - 1) {
+            return PathPlanningResult.failure("任务已接近完成，无需重规划");
+        }
+
+        String currentPosition = currentPath.get(currentStep);
+        Set<String> blockedNodes = new HashSet<>();
+        blockedNodes.add(blockedNode);
+
+        for (int i = 0; i < currentStep; i++) {
+            blockedNodes.add(currentPath.get(i));
+        }
+
+        String originalPath = task.getPath();
+
+        for (int attempt = 0; attempt < MAX_REPLAN_ATTEMPTS; attempt++) {
+            PathPlanningResult result = planPathWithDetour(currentPosition, task.getEndPoint(), blockedNodes);
+            if (result.isSuccess()) {
+                List<String> newPath = new ArrayList<>();
+                for (int i = 0; i < currentStep; i++) {
+                    newPath.add(currentPath.get(i));
+                }
+                newPath.addAll(result.getPath());
+
+                double totalDistance = calculatePathDistance(newPath);
+                return PathPlanningResult.detour(newPath, totalDistance, originalPath, "DYNAMIC-REPLAN");
+            }
+
+            log.warn("第 {} 次重规划失败，尝试减少规避节点", attempt + 1);
+            blockedNodes.remove(blockedNode);
+        }
+
+        return PathPlanningResult.failure("动态重规划失败，所有路径均被阻塞");
+    }
+
+    public PathPlanningResult replanFromCurrentPosition(Task task) {
+        List<String> currentPath = decodePath(task.getPath());
+        Integer currentStep = task.getCurrentStep();
+        if (currentStep == null) {
+            currentStep = 0;
+        }
+
+        if (currentStep >= currentPath.size() - 1) {
+            return PathPlanningResult.failure("任务已接近完成，无需重规划");
+        }
+
+        String currentPosition = currentPath.get(currentStep);
+        PathPlanningResult result = planPathWithAlgorithm(currentPosition, task.getEndPoint(), "A*");
+
+        if (!result.isSuccess()) {
+            return result;
+        }
+
+        List<String> newPath = new ArrayList<>();
+        for (int i = 0; i < currentStep; i++) {
+            newPath.add(currentPath.get(i));
+        }
+        newPath.addAll(result.getPath());
+
+        double totalDistance = calculatePathDistance(newPath);
+        return PathPlanningResult.builder()
+                .success(true)
+                .path(newPath)
+                .totalDistance(totalDistance)
+                .algorithm("REPLAN-FROM-CURRENT")
+                .hasDetour(!newPath.equals(currentPath))
+                .originalPath(task.getPath())
+                .build();
+    }
+
+    public boolean tryLockNode(String nodeCode, String agvId) {
+        String key = NODE_LOCK_PREFIX + nodeCode;
+        Boolean locked = redisTemplate.opsForValue()
+                .setIfAbsent(key, agvId, NODE_LOCK_SECONDS, TimeUnit.SECONDS);
+        if (Boolean.TRUE.equals(locked)) {
+            log.debug("AGV {} 获得节点锁: {}", agvId, nodeCode);
+        }
+        return Boolean.TRUE.equals(locked);
+    }
+
+    public void unlockNode(String nodeCode, String agvId) {
+        String key = NODE_LOCK_PREFIX + nodeCode;
+        String holder = redisTemplate.opsForValue().get(key);
+        if (agvId.equals(holder)) {
+            redisTemplate.delete(key);
+            log.debug("AGV {} 释放节点锁: {}", agvId, nodeCode);
+        }
+    }
+
+    public boolean tryLockIntersection(String intersectionCode, String agvId) {
+        String key = INTERSECTION_LOCK_PREFIX + intersectionCode;
+        Boolean locked = redisTemplate.opsForValue()
+                .setIfAbsent(key, agvId, INTERSECTION_LOCK_SECONDS, TimeUnit.SECONDS);
+        if (Boolean.TRUE.equals(locked)) {
+            log.debug("AGV {} 获得路口锁: {}", agvId, intersectionCode);
+        }
+        return Boolean.TRUE.equals(locked);
+    }
+
+    public void unlockIntersection(String intersectionCode, String agvId) {
+        String key = INTERSECTION_LOCK_PREFIX + intersectionCode;
+        String holder = redisTemplate.opsForValue().get(key);
+        if (agvId.equals(holder)) {
+            redisTemplate.delete(key);
+            log.debug("AGV {} 释放路口锁: {}", agvId, intersectionCode);
+        }
+    }
+
+    public boolean isNodeLocked(String nodeCode) {
+        String key = NODE_LOCK_PREFIX + nodeCode;
+        return Boolean.TRUE.equals(redisTemplate.hasKey(key));
+    }
+
+    public String getNodeLockHolder(String nodeCode) {
+        String key = NODE_LOCK_PREFIX + nodeCode;
+        return redisTemplate.opsForValue().get(key);
+    }
+
+    public void markPathBlocked(String nodeCode, String reason) {
+        String key = PATH_BLOCKED_PREFIX + nodeCode;
+        redisTemplate.opsForValue().set(key, reason, PATH_BLOCKED_SECONDS, TimeUnit.SECONDS);
+        log.warn("节点 {} 被标记为阻塞: {}", nodeCode, reason);
+    }
+
+    public void clearPathBlocked(String nodeCode) {
+        String key = PATH_BLOCKED_PREFIX + nodeCode;
+        redisTemplate.delete(key);
+        log.info("节点 {} 阻塞已清除", nodeCode);
+    }
+
+    public boolean isPathBlocked(String nodeCode) {
+        String key = PATH_BLOCKED_PREFIX + nodeCode;
+        return Boolean.TRUE.equals(redisTemplate.hasKey(key));
+    }
+
+    public Map<String, String> getBlockedPaths() {
+        Set<String> keys = redisTemplate.keys(PATH_BLOCKED_PREFIX + "*");
+        Map<String, String> blocked = new HashMap<>();
+        if (keys == null) {
+            return blocked;
+        }
+        for (String key : keys) {
+            String node = key.replace(PATH_BLOCKED_PREFIX, "");
+            String reason = redisTemplate.opsForValue().get(key);
+            if (reason != null) {
+                blocked.put(node, reason);
+            }
+        }
+        return blocked;
+    }
+
+    public void setAgvWaitingFor(String agvId, String targetAgvId) {
+        String key = AGV_WAITING_FOR_PREFIX + agvId;
+        redisTemplate.opsForValue().set(key, targetAgvId, WAITING_STATUS_SECONDS, TimeUnit.SECONDS);
+    }
+
+    public String getAgvWaitingFor(String agvId) {
+        String key = AGV_WAITING_FOR_PREFIX + agvId;
+        return redisTemplate.opsForValue().get(key);
+    }
+
+    public void clearAgvWaitingFor(String agvId) {
+        String key = AGV_WAITING_FOR_PREFIX + agvId;
+        redisTemplate.delete(key);
+    }
+
+    public boolean checkPathConflict(List<String> path1, List<String> path2) {
+        Set<String> path1Set = new HashSet<>(path1);
+        for (String node : path2) {
+            if (path1Set.contains(node)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public List<String> getConflictNodes(List<String> path1, List<String> path2) {
+        Set<String> path1Set = new HashSet<>(path1);
+        List<String> conflicts = new ArrayList<>();
+        for (String node : path2) {
+            if (path1Set.contains(node)) {
+                conflicts.add(node);
+            }
+        }
+        return conflicts;
+    }
+
+    public double calculatePathDistance(List<String> path) {
+        if (path == null || path.size() < 2) {
+            return 0;
+        }
+        double totalDistance = 0;
+        for (int i = 0; i < path.size() - 1; i++) {
+            MapNode node1 = nodeCache.get(path.get(i));
+            MapNode node2 = nodeCache.get(path.get(i + 1));
+            if (node1 != null && node2 != null) {
+                totalDistance += calculateDistance(node1, node2);
+            }
+        }
+        return totalDistance;
+    }
+
+    public double estimateTravelTime(List<String> path) {
+        double distance = calculatePathDistance(path);
+        return distance / DEFAULT_AGV_SPEED;
+    }
+
+    private List<String> reconstructPath(Map<String, String> previous, String start, String end) {
         List<String> path = new ArrayList<>();
         String current = end;
 
@@ -162,13 +524,6 @@ public class PathPlanningService {
         return path;
     }
 
-    /**
-     * 检查路径是否可用（无占用）
-     * 路径上所有节点都未被占用时才返回true
-     *
-     * @param path 待检查的路径节点列表
-     * @return true表示路径可用，false表示有节点被占用
-     */
     public boolean isPathAvailable(List<String> path) {
         for (String node : path) {
             String key = PATH_OCCUPY_PREFIX + node;
@@ -179,15 +534,6 @@ public class PathPlanningService {
         return true;
     }
 
-    /**
-     * 占用路径
-     * 占用当前位置及前瞻3步的节点，防止其他AGV冲突
-     * 占用信息存储在Redis中，设置过期时间防止死锁
-     *
-     * @param agvId AGV ID
-     * @param path 完整路径节点列表
-     * @param currentStep 当前执行到的步骤索引
-     */
     public void occupyPath(String agvId, List<String> path, int currentStep) {
         if (path == null || currentStep >= path.size()) {
             return;
@@ -198,18 +544,14 @@ public class PathPlanningService {
             String node = path.get(i);
             String key = PATH_OCCUPY_PREFIX + node;
             redisTemplate.opsForValue().set(key, agvId, PATH_OCCUPY_SECONDS, TimeUnit.SECONDS);
+
+            MapNode mapNode = nodeCache.get(node);
+            if (mapNode != null && Boolean.TRUE.equals(mapNode.getIsIntersection())) {
+                tryLockIntersection(node, agvId);
+            }
         }
     }
 
-    /**
-     * 释放已走过的路径
-     * 释放当前步骤之前的所有节点，让其他AGV可以使用
-     * 只释放当前AGV占用的节点
-     *
-     * @param agvId AGV ID
-     * @param path 完整路径节点列表
-     * @param currentStep 当前执行到的步骤索引
-     */
     public void releasePath(String agvId, List<String> path, int currentStep) {
         if (path == null || currentStep <= 0) {
             return;
@@ -222,16 +564,14 @@ public class PathPlanningService {
             if (agvId.equals(occupant)) {
                 redisTemplate.delete(key);
             }
+
+            MapNode mapNode = nodeCache.get(node);
+            if (mapNode != null && Boolean.TRUE.equals(mapNode.getIsIntersection())) {
+                unlockIntersection(node, agvId);
+            }
         }
     }
 
-    /**
-     * 释放AGV占用的所有路径
-     * 任务取消、AGV故障或任务重分配时调用
-     * 遍历所有占用的路径节点，只释放当前AGV占用的
-     *
-     * @param agvId AGV ID
-     */
     public void releaseAllPath(String agvId) {
         Set<String> keys = redisTemplate.keys(PATH_OCCUPY_PREFIX + "*");
         if (keys == null) {
@@ -243,6 +583,28 @@ public class PathPlanningService {
                 redisTemplate.delete(key);
             }
         }
+
+        Set<String> intersectionKeys = redisTemplate.keys(INTERSECTION_LOCK_PREFIX + "*");
+        if (intersectionKeys != null) {
+            for (String key : intersectionKeys) {
+                String holder = redisTemplate.opsForValue().get(key);
+                if (agvId.equals(holder)) {
+                    redisTemplate.delete(key);
+                }
+            }
+        }
+
+        Set<String> nodeKeys = redisTemplate.keys(NODE_LOCK_PREFIX + "*");
+        if (nodeKeys != null) {
+            for (String key : nodeKeys) {
+                String holder = redisTemplate.opsForValue().get(key);
+                if (agvId.equals(holder)) {
+                    redisTemplate.delete(key);
+                }
+            }
+        }
+
+        clearAgvWaitingFor(agvId);
     }
 
     private double calculateDistance(MapNode node1, MapNode node2) {
@@ -251,23 +613,10 @@ public class PathPlanningService {
         return Math.sqrt(dx * dx + dy * dy);
     }
 
-    /**
-     * 将路径节点列表编码为JSON字符串
-     * 用于存储到数据库
-     *
-     * @param path 路径节点列表
-     * @return JSON格式的路径字符串
-     */
     public String encodePath(List<String> path) {
         return JSON.toJSONString(path);
     }
 
-    /**
-     * 将JSON格式的路径字符串解码为节点列表
-     *
-     * @param pathJson JSON格式的路径字符串
-     * @return 路径节点列表
-     */
     @SuppressWarnings("unchecked")
     public List<String> decodePath(String pathJson) {
         if (pathJson == null || pathJson.isEmpty()) {
@@ -280,12 +629,6 @@ public class PathPlanningService {
         }
     }
 
-    /**
-     * 获取当前所有被占用的路径节点
-     * 用于页面展示和调度控制
-     *
-     * @return 节点编号 -> 占用AGV ID 的映射
-     */
     public Map<String, String> getOccupiedPaths() {
         Set<String> keys = redisTemplate.keys(PATH_OCCUPY_PREFIX + "*");
         Map<String, String> occupied = new HashMap<>();
@@ -302,26 +645,36 @@ public class PathPlanningService {
         return occupied;
     }
 
-    /**
-     * 计算任务路径的总长度
-     * 根据路径节点的坐标计算欧几里得距离之和
-     *
-     * @param task 任务实体（包含路径信息）
-     * @return 路径总长度（米）
-     */
-    public double calculatePathLength(Task task) {
-        List<String> path = decodePath(task.getPath());
-        if (path.size() < 2) {
-            return 0;
+    public Map<String, String> getLockedIntersections() {
+        Set<String> keys = redisTemplate.keys(INTERSECTION_LOCK_PREFIX + "*");
+        Map<String, String> locked = new HashMap<>();
+        if (keys == null) {
+            return locked;
         }
-        double totalLength = 0;
-        for (int i = 0; i < path.size() - 1; i++) {
-            MapNode node1 = mapNodeRepository.findByNodeCode(path.get(i)).orElse(null);
-            MapNode node2 = mapNodeRepository.findByNodeCode(path.get(i + 1)).orElse(null);
-            if (node1 != null && node2 != null) {
-                totalLength += calculateDistance(node1, node2);
+        for (String key : keys) {
+            String intersection = key.replace(INTERSECTION_LOCK_PREFIX, "");
+            String agvId = redisTemplate.opsForValue().get(key);
+            if (agvId != null) {
+                locked.put(intersection, agvId);
             }
         }
-        return totalLength;
+        return locked;
+    }
+
+    public double calculatePathLength(Task task) {
+        List<String> path = decodePath(task.getPath());
+        return calculatePathDistance(path);
+    }
+
+    public void refreshNodeCache() {
+        List<MapNode> nodes = mapNodeRepository.findAll();
+        nodeCache.clear();
+        for (MapNode node : nodes) {
+            nodeCache.put(node.getNodeCode(), node);
+        }
+    }
+
+    public MapNode getNodeFromCache(String nodeCode) {
+        return nodeCache.get(nodeCode);
     }
 }

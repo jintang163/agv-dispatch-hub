@@ -1,7 +1,6 @@
 package com.agv.dispatch.common.entity;
 
 import com.agv.dispatch.common.enums.ConflictResolutionStrategy;
-import com.agv.dispatch.common.enums.ConflictType;
 import jakarta.persistence.*;
 import lombok.Data;
 import org.hibernate.annotations.CreationTimestamp;
@@ -10,38 +9,30 @@ import java.time.LocalDateTime;
 
 @Data
 @Entity
-@Table(name = "agv_conflict_record", indexes = {
-        @Index(name = "idx_create_time", columnList = "createTime")
+@Table(name = "agv_deadlock_record", indexes = {
+        @Index(name = "idx_deadlock_create_time", columnList = "createTime"),
+        @Index(name = "idx_deadlock_resolved", columnList = "resolved")
 })
-public class ConflictRecord {
+public class DeadlockRecord {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(length = 32)
-    private String agvId1;
-
-    @Column(length = 32)
-    private String agvId2;
+    @Column(length = 1024, nullable = false)
+    private String waitChain;
 
     @Column(nullable = false)
-    private ConflictType conflictType;
+    private Integer agvCount;
 
     @Column(length = 32)
-    private String location;
-
-    @Column(length = 32)
-    private String taskId1;
-
-    @Column(length = 32)
-    private String taskId2;
-
-    @Column(length = 512)
-    private String resolution;
+    private String selectedAgvId;
 
     @Enumerated(EnumType.ORDINAL)
     private ConflictResolutionStrategy resolutionStrategy;
+
+    @Column(length = 1024)
+    private String resolutionDetail;
 
     private Boolean resolved;
 

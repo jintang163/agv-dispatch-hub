@@ -1,40 +1,30 @@
 package com.agv.dispatch.core.service;
 
+import com.agv.dispatch.common.dto.PathPlanningResult;
 import com.agv.dispatch.common.entity.Agv;
 import com.agv.dispatch.common.entity.ConflictRecord;
+import com.agv.dispatch.common.entity.MapNode;
 import com.agv.dispatch.common.entity.Task;
+import com.agv.dispatch.common.enums.ConflictResolutionStrategy;
 import com.agv.dispatch.common.enums.ConflictType;
 import com.agv.dispatch.common.enums.TaskPriority;
 import com.agv.dispatch.core.repository.AgvRepository;
 import com.agv.dispatch.core.repository.ConflictRecordRepository;
 import com.agv.dispatch.core.repository.TaskRepository;
+import com.alibaba.fastjson2.JSON;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
-import static com.agv.dispatch.common.constant.RedisKeyConstant.CONFLICT_KEY;
+import static com.agv.dispatch.common.constant.RedisKeyConstant.*;
 
-/**
- * 冲突检测与解决服务
- * 实时检测多AGV运行中的各种冲突，并自动应用解决策略
- *
- * 检测的冲突类型：
- * - 对向冲突：两AGV相向行驶在同一段路径
- * - 交叉冲突：两AGV路径在某节点交叉
- * - 跟车冲突：后车速度快于前车，距离过近
- * - 资源冲突：多AGV抢占同一节点或资源
- *
- * 解决策略（按优先级）：
- * 1. 任务优先级比较：高优先级任务优先
- * 2. 截止时间比较：截止时间早的任务优先
- * 3. 任务进度比较：进度快的任务优先
- * 低优先级AGV暂停让行
- */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -47,32 +37,20 @@ public class ConflictDetectionService {
     private final StringRedisTemplate redisTemplate;
 
     private static final double SAFE_DISTANCE = 2.0;
+    private static final int DETOUR_THRESHOLD = 2;
 
-    /**
-     * 检测所有类型的冲突
-     * 依次检测路径冲突、位置冲突、资源冲突
-     * 检测结果会缓存到Redis供实时查询
-     *
-     * @return 检测到的冲突记录列表
-     */
     public List<ConflictRecord> detectConflicts() {
         List<ConflictRecord> conflicts = new ArrayList<>();
 
         conflicts.addAll(detectPathConflicts());
         conflicts.addAll(detectPositionConflicts());
         conflicts.addAll(detectResourceConflicts());
+        conflicts.addAll(detectIntersectionConflicts());
 
         cacheConflicts(conflicts);
         return conflicts;
     }
 
-    /**
-     * 检测路径冲突
-     * 检查所有工作中AGV的前瞻路径（当前位置+3步）
-     * 如果多个AGV的前瞻路径包含同一节点，则判定为冲突
-     *
-     * @return 路径冲突记录列表
-     */
     private List<ConflictRecord> detectPathConflicts() {
         List<ConflictRecord> conflicts = new ArrayList<>();
         List<Agv> workingAgvs = agvRepository.findByStatusIn(
@@ -120,15 +98,61 @@ public class ConflictDetectionService {
         return conflicts;
     }
 
-    /**
-     * 判断冲突类型
-     * 根据两AGV的路径前后节点关系，判断具体的冲突类型
-     *
-     * @param agv1 发生冲突的AGV1
-     * @param agv2 发生冲突的AGV2
-     * @param node 冲突节点
-     * @return 冲突类型枚举
-     */
+    private List<ConflictRecord> detectIntersectionConflicts() {
+        List<ConflictRecord> conflicts = new ArrayList<>();
+        List<Agv> workingAgvs = agvRepository.findByStatusIn(
+                Arrays.asList(com.agv.dispatch.common.enums.AgvStatus.WORKING,
+                        com.agv.dispatch.common.enums.AgvStatus.PAUSED));
+
+        Map<String, List<Agv>> intersectionApproach = new HashMap<>();
+
+        for (Agv agv : workingAgvs) {
+            Task task = taskRepository.findById(agv.getCurrentTaskId()).orElse(null);
+            if (task == null || task.getPath() == null) {
+                continue;
+            }
+
+            List<String> path = pathPlanningService.decodePath(task.getPath());
+            Integer currentStep = task.getCurrentStep();
+            if (currentStep == null) {
+                currentStep = 0;
+            }
+
+            int lookAhead = Math.min(currentStep + 5, path.size());
+            for (int i = currentStep; i < lookAhead; i++) {
+                if (i >= 0 && i < path.size()) {
+                    String node = path.get(i);
+                    MapNode mapNode = pathPlanningService.getNodeFromCache(node);
+                    if (mapNode != null && Boolean.TRUE.equals(mapNode.getIsIntersection())) {
+                        intersectionApproach.computeIfAbsent(node, k -> new ArrayList<>()).add(agv);
+                        break;
+                    }
+                }
+                MapNode currentNode = pathPlanningService.getNodeFromCache(node);
+                if (currentNode != null && Boolean.TRUE.equals(currentNode.getIsIntersection())) {
+                    break;
+                }
+            }
+        }
+
+        for (Map.Entry<String, List<Agv>> entry : intersectionApproach.entrySet()) {
+            String intersection = entry.getKey();
+            List<Agv> agvs = entry.getValue();
+            if (agvs.size() >= 2) {
+                for (int i = 0; i < agvs.size(); i++) {
+                    for (int j = i + 1; j < agvs.size(); j++) {
+                        conflicts.add(createConflictRecord(
+                                agvs.get(i), agvs.get(j), ConflictType.RESOURCE,
+                                "路口:" + intersection));
+                    }
+                }
+                log.warn("检测到路口冲突: {}, AGV数量: {}", intersection, agvs.size());
+            }
+        }
+
+        return conflicts;
+    }
+
     private ConflictType determineConflictType(Agv agv1, Agv agv2, String node) {
         Task task1 = taskRepository.findById(agv1.getCurrentTaskId()).orElse(null);
         Task task2 = taskRepository.findById(agv2.getCurrentTaskId()).orElse(null);
@@ -168,13 +192,6 @@ public class ConflictDetectionService {
         return ConflictType.RESOURCE;
     }
 
-    /**
-     * 检测位置冲突
-     * 检查所有工作中AGV的实时位置，如果两AGV距离小于安全距离，则判定为冲突
-     * 安全距离默认为2米
-     *
-     * @return 位置冲突记录列表
-     */
     private List<ConflictRecord> detectPositionConflicts() {
         List<ConflictRecord> conflicts = new ArrayList<>();
         List<Agv> workingAgvs = agvRepository.findByStatusIn(
@@ -203,27 +220,10 @@ public class ConflictDetectionService {
         return conflicts;
     }
 
-    /**
-     * 检测资源冲突
-     * 预留接口，用于检测充电站、换乘站等共享资源的抢占冲突
-     *
-     * @return 资源冲突记录列表
-     */
     private List<ConflictRecord> detectResourceConflicts() {
-        List<ConflictRecord> conflicts = new ArrayList<>();
-        return conflicts;
+        return new ArrayList<>();
     }
 
-    /**
-     * 创建冲突记录
-     * 记录冲突的AGV、类型、位置、关联任务等信息
-     *
-     * @param agv1 发生冲突的AGV1
-     * @param agv2 发生冲突的AGV2
-     * @param conflictType 冲突类型
-     * @param location 冲突位置（节点编号）
-     * @return 保存后的冲突记录
-     */
     private ConflictRecord createConflictRecord(Agv agv1, Agv agv2,
                                                 ConflictType conflictType, String location) {
         ConflictRecord record = new ConflictRecord();
@@ -241,13 +241,7 @@ public class ConflictDetectionService {
         return saved;
     }
 
-    /**
-     * 解决单个冲突
-     * 应用三级解决策略确定让行方，然后暂停让行AGV
-     *
-     * @param conflictId 冲突记录ID
-     * @return 解决策略说明
-     */
+    @Transactional
     public String resolveConflict(Long conflictId) {
         ConflictRecord conflict = conflictRecordRepository.findById(conflictId)
                 .orElseThrow(() -> new IllegalArgumentException("冲突记录不存在: " + conflictId));
@@ -267,17 +261,6 @@ public class ConflictDetectionService {
         return resolution;
     }
 
-    /**
-     * 应用冲突解决策略
-     * 三级判定策略：
-     * 1. 任务优先级比较：高优先级任务优先
-     * 2. 截止时间比较：截止时间早的任务优先
-     * 3. 任务进度比较：进度快的任务优先
-     * 低优先级AGV暂停让行
-     *
-     * @param conflict 冲突记录
-     * @return 解决策略说明
-     */
     private String applyResolutionStrategy(ConflictRecord conflict) {
         Task task1 = taskRepository.findById(conflict.getTaskId1()).orElse(null);
         Task task2 = taskRepository.findById(conflict.getTaskId2()).orElse(null);
@@ -289,22 +272,94 @@ public class ConflictDetectionService {
         Agv agv1 = agvRepository.findById(conflict.getAgvId1()).orElse(null);
         Agv agv2 = agvRepository.findById(conflict.getAgvId2()).orElse(null);
 
+        ConflictResolutionStrategy strategy = selectResolutionStrategy(conflict, task1, task2, agv1, agv2);
+
+        switch (strategy) {
+            case WAIT:
+                return applyWaitStrategy(conflict, task1, task2, agv1, agv2);
+            case DETOUR:
+                return applyDetourStrategy(conflict, task1, task2, agv1, agv2);
+            case YIELD:
+                return applyYieldStrategy(conflict, task1, task2, agv1, agv2);
+            case REASSIGN:
+                return applyReassignStrategy(conflict, task1, task2, agv1, agv2);
+            default:
+                return applyWaitStrategy(conflict, task1, task2, agv1, agv2);
+        }
+    }
+
+    private ConflictResolutionStrategy selectResolutionStrategy(ConflictRecord conflict,
+                                                           Task task1, Task task2,
+                                                           Agv agv1, Agv agv2) {
+        if (conflict.getConflictType() == ConflictType.HEAD_ON) {
+            if (task1 != null && task2 != null) {
+                int detourCount1 = countDetourOptions(task1);
+                int detourCount2 = countDetourOptions(task2);
+                if (detourCount1 >= DETOUR_THRESHOLD || detourCount2 >= DETOUR_THRESHOLD) {
+                    return ConflictResolutionStrategy.DETOUR;
+                }
+            }
+            return ConflictResolutionStrategy.WAIT;
+        }
+
+        if (conflict.getConflictType() == ConflictType.CROSS) {
+            String location = conflict.getLocation();
+            if (location != null && location.startsWith("路口")) {
+                return ConflictResolutionStrategy.YIELD;
+            }
+            return ConflictResolutionStrategy.WAIT;
+        }
+
+        MapNode node = pathPlanningService.getNodeFromCache(conflict.getLocation());
+        if (node != null && Boolean.TRUE.equals(node.getIsIntersection())) {
+            return ConflictResolutionStrategy.YIELD;
+        }
+
+        return ConflictResolutionStrategy.WAIT;
+    }
+
+    private int countDetourOptions(Task task) {
+        if (task == null || task.getPath() == null) {
+            return 0;
+        }
+        List<String> path = pathPlanningService.decodePath(task.getPath());
+        Integer currentStep = task.getCurrentStep();
+        if (currentStep == null || currentStep >= path.size() - 1) {
+            return 0;
+        }
+        String currentPos = path.get(currentStep);
+        Set<String> avoidNodes = new HashSet<>();
+        for (int i = Math.max(0, currentStep - 1); i <= Math.min(currentStep + 2, path.size() - 1); i++) {
+            avoidNodes.add(path.get(i));
+        }
+        PathPlanningResult result = pathPlanningService.planPathWithDetour(
+                currentPos, task.getEndPoint(), avoidNodes);
+        return result.isSuccess() ? 1 : 0;
+    }
+
+    private String applyWaitStrategy(ConflictRecord conflict,
+                                    Task task1, Task task2,
+                                    Agv agv1, Agv agv2) {
         if (task1 == null) {
             pauseAgv(agv2);
+            pathPlanningService.setAgvWaitingFor(agv2.getId(), agv1.getId());
             return "AGV2任务暂停，等待AGV1通过";
         }
         if (task2 == null) {
             pauseAgv(agv1);
+            pathPlanningService.setAgvWaitingFor(agv1.getId(), agv2.getId());
             return "AGV1任务暂停，等待AGV2通过";
         }
 
         int priorityCompare = task1.getPriority().getCode() - task2.getPriority().getCode();
         if (priorityCompare > 0) {
             pauseAgv(agv2);
+            pathPlanningService.setAgvWaitingFor(agv2.getId(), agv1.getId());
             return String.format("任务1优先级(%s)高于任务2(%s)，AGV2暂停让行",
                     task1.getPriority(), task2.getPriority());
         } else if (priorityCompare < 0) {
             pauseAgv(agv1);
+            pathPlanningService.setAgvWaitingFor(agv1.getId(), agv2.getId());
             return String.format("任务2优先级(%s)高于任务1(%s)，AGV1暂停让行",
                     task2.getPriority(), task1.getPriority());
         }
@@ -312,9 +367,11 @@ public class ConflictDetectionService {
         if (task1.getDeadline() != null && task2.getDeadline() != null) {
             if (task1.getDeadline().isBefore(task2.getDeadline())) {
                 pauseAgv(agv2);
+                pathPlanningService.setAgvWaitingFor(agv2.getId(), agv1.getId());
                 return "任务1截止时间更早，AGV2暂停让行";
             } else {
                 pauseAgv(agv1);
+                pathPlanningService.setAgvWaitingFor(agv1.getId(), agv2.getId());
                 return "任务2截止时间更早，AGV1暂停让行";
             }
         }
@@ -323,19 +380,119 @@ public class ConflictDetectionService {
         int step2 = task2.getCurrentStep() != null ? task2.getCurrentStep() : 0;
         if (step1 > step2) {
             pauseAgv(agv2);
+            pathPlanningService.setAgvWaitingFor(agv2.getId(), agv1.getId());
             return "AGV1进度更快，AGV2暂停让行";
         } else {
             pauseAgv(agv1);
+            pathPlanningService.setAgvWaitingFor(agv1.getId(), agv2.getId());
             return "AGV2进度更快，AGV1暂停让行";
         }
     }
 
-    /**
-     * 暂停AGV（冲突解决时调用）
-     * 将AGV状态设置为暂停，等待冲突解除
-     *
-     * @param agv 需要暂停的AGV
-     */
+    private String applyDetourStrategy(ConflictRecord conflict,
+                                     Task task1, Task task2,
+                                     Agv agv1, Agv agv2) {
+        if (task1 == null || task2 == null) {
+            return applyWaitStrategy(conflict, task1, task2, agv1, agv2);
+        }
+
+        List<String> path1 = pathPlanningService.decodePath(task1.getPath());
+        List<String> path2 = pathPlanningService.decodePath(task2.getPath());
+
+        List<String> conflictNodes = pathPlanningService.getConflictNodes(path1, path2);
+
+        int detourCount1 = countDetourOptions(task1);
+        int detourCount2 = countDetourOptions(task2);
+
+        if (detourCount1 > 0 && detourCount2 > 0) {
+            int priorityCompare = task1.getPriority().getCode() - task2.getPriority().getCode();
+            if (priorityCompare >= 0) {
+                return performDetour(task2, agv2, conflictNodes, "AGV2");
+            } else {
+                return performDetour(task1, agv1, conflictNodes, "AGV1");
+            }
+        } else if (detourCount1 > 0) {
+            return performDetour(task1, agv1, conflictNodes, "AGV1");
+        } else if (detourCount2 > 0) {
+            return performDetour(task2, agv2, conflictNodes, "AGV2");
+        }
+
+        return applyWaitStrategy(conflict, task1, task2, agv1, agv2);
+    }
+
+    private String performDetour(Task task, Agv agv, List<String> conflictNodes, String agvLabel) {
+        Set<String> avoidNodes = new HashSet<>(conflictNodes);
+        List<String> currentPath = pathPlanningService.decodePath(task.getPath());
+        Integer currentStep = task.getCurrentStep();
+        if (currentStep == null) {
+            currentStep = 0;
+        }
+
+        String currentPosition = currentStep < currentPath.size() ?
+                currentPath.get(currentStep) : task.getStartPoint();
+
+        PathPlanningResult detourResult = pathPlanningService.planPathWithDetour(
+                currentPosition, task.getEndPoint(), avoidNodes);
+
+        if (detourResult.isSuccess()) {
+            List<String> newPath = new ArrayList<>();
+            for (int i = 0; i < currentStep; i++) {
+                newPath.add(currentPath.get(i));
+            }
+            newPath.addAll(detourResult.getPath());
+
+            task.setPath(pathPlanningService.encodePath(newPath));
+            task.setCurrentStep(currentStep);
+            taskRepository.save(task);
+
+            pathPlanningService.releaseAllPath(agv.getId());
+            pathPlanningService.occupyPath(agv.getId(), newPath, currentStep);
+
+            pathPlanningService.clearAgvWaitingFor(agv.getId());
+
+            log.info("{} 执行绕行重规划: 原路径长度: {}, 新路径长度: {}",
+                    agvLabel, currentPath.size(), newPath.size());
+            return String.format("%s绕行重规划成功，冲突节点: %s", agvLabel, conflictNodes);
+        }
+
+        return String.format("%s绕行失败，转为等待策略", agvLabel);
+    }
+
+    private String applyYieldStrategy(ConflictRecord conflict,
+                                    Task task1, Task task2,
+                                    Agv agv1, Agv agv2) {
+        String intersection = conflict.getLocation();
+        if (intersection != null && intersection.startsWith("路口:")) {
+            intersection = intersection.substring(3);
+        }
+
+        if (task1 == null || task2 == null) {
+            return applyWaitStrategy(conflict, task1, task2, agv1, agv2);
+        }
+
+        boolean agv1HasLock = pathPlanningService.tryLockIntersection(intersection, agv1.getId());
+        if (agv1HasLock) {
+            pauseAgv(agv2);
+            pathPlanningService.setAgvWaitingFor(agv2.getId(), agv1.getId());
+            return String.format("路口会车协议: AGV1获得路口锁，AGV2暂停等待AGV1通过路口: %s", intersection);
+        }
+
+        boolean agv2HasLock = pathPlanningService.tryLockIntersection(intersection, agv2.getId());
+        if (agv2HasLock) {
+            pauseAgv(agv1);
+            pathPlanningService.setAgvWaitingFor(agv1.getId(), agv2.getId());
+            return String.format("路口会车协议: AGV2获得路口锁，AGV1暂停等待AGV2通过路口: %s", intersection);
+        }
+
+        return applyWaitStrategy(conflict, task1, task2, agv1, agv2);
+    }
+
+    private String applyReassignStrategy(ConflictRecord conflict,
+                                         Task task1, Task task2,
+                                         Agv agv1, Agv agv2) {
+        return applyWaitStrategy(conflict, task1, task2, agv1, agv2);
+    }
+
     private void pauseAgv(Agv agv) {
         if (agv == null) {
             return;
@@ -345,11 +502,6 @@ public class ConflictDetectionService {
         log.info("AGV已暂停: {}", agv.getAgvNo());
     }
 
-    /**
-     * 自动解决所有未解决的冲突
-     * 按时间倒序处理所有未解决的冲突记录
-     * 处理失败的冲突会记录日志但不抛出异常
-     */
     public void resolveAllConflicts() {
         List<ConflictRecord> unresolved = conflictRecordRepository.findByResolvedFalseOrderByCreateTimeDesc();
         for (ConflictRecord conflict : unresolved) {
@@ -357,6 +509,31 @@ public class ConflictDetectionService {
                 resolveConflict(conflict.getId());
             } catch (Exception e) {
                 log.error("解决冲突失败: {}", conflict.getId(), e);
+            }
+        }
+        releaseExpiredLocks();
+    }
+
+    public void releaseExpiredLocks() {
+        Set<String> nodeKeys = redisTemplate.keys(NODE_LOCK_PREFIX + "*");
+        if (nodeKeys != null) {
+            for (String key : nodeKeys) {
+                Long ttl = redisTemplate.getExpire(key, TimeUnit.SECONDS);
+                if (ttl != null && ttl <= 0) {
+                    redisTemplate.delete(key);
+                    log.debug("清理过期节点锁: {}", key);
+                }
+            }
+        }
+
+        Set<String> intersectionKeys = redisTemplate.keys(INTERSECTION_LOCK_PREFIX + "*");
+        if (intersectionKeys != null) {
+            for (String key : intersectionKeys) {
+                Long ttl = redisTemplate.getExpire(key, TimeUnit.SECONDS);
+                if (ttl != null && ttl <= 0) {
+                    redisTemplate.delete(key);
+                    log.debug("清理过期路口锁: {}", key);
+                }
             }
         }
     }
@@ -367,12 +544,6 @@ public class ConflictDetectionService {
         return Math.sqrt(dx * dx + dy * dy);
     }
 
-    /**
-     * 将冲突检测结果缓存到Redis
-     * 供前端实时查询和WebSocket推送
-     *
-     * @param conflicts 冲突记录列表
-     */
     private void cacheConflicts(List<ConflictRecord> conflicts) {
         if (conflicts.isEmpty()) {
             redisTemplate.delete(CONFLICT_KEY);
@@ -386,23 +557,10 @@ public class ConflictDetectionService {
         redisTemplate.opsForHash().putAll(CONFLICT_KEY, conflictData);
     }
 
-    /**
-     * 获取所有未解决的冲突记录
-     * 按创建时间倒序排列
-     *
-     * @return 未解决的冲突记录列表
-     */
     public List<ConflictRecord> getUnresolvedConflicts() {
         return conflictRecordRepository.findByResolvedFalseOrderByCreateTimeDesc();
     }
 
-    /**
-     * 检查AGV是否涉及高优先级任务的冲突
-     * 用于调度决策时判断是否需要特殊处理
-     *
-     * @param agvId AGV ID
-     * @return true表示该AGV涉及高优先级任务的冲突
-     */
     public boolean hasHighPriorityConflict(String agvId) {
         List<ConflictRecord> unresolved = getUnresolvedConflicts();
         for (ConflictRecord conflict : unresolved) {
@@ -416,5 +574,36 @@ public class ConflictDetectionService {
             }
         }
         return false;
+    }
+
+    @Transactional
+    public boolean tryIntersectionPass(String agvId, String intersectionCode) {
+        Agv agv = agvRepository.findById(agvId).orElse(null);
+        if (agv == null) {
+            return false;
+        }
+
+        Task task = taskRepository.findById(agv.getCurrentTaskId()).orElse(null);
+        if (task == null) {
+            return false;
+        }
+
+        boolean locked = pathPlanningService.tryLockIntersection(intersectionCode, agvId);
+        if (locked) {
+            log.info("AGV {} 获得路口通行权: {}", agv.getAgvNo(), intersectionCode);
+            return true;
+        }
+
+        String holder = pathPlanningService.getNodeLockHolder(intersectionCode);
+        log.info("AGV {} 等待路口: {}, 当前持有者: {}", agv.getAgvNo(), intersectionCode, holder);
+        pathPlanningService.setAgvWaitingFor(agvId, holder);
+        return false;
+    }
+
+    @Transactional
+    public void completeIntersectionPass(String agvId, String intersectionCode) {
+        pathPlanningService.unlockIntersection(intersectionCode, agvId);
+        pathPlanningService.clearAgvWaitingFor(agvId);
+        log.info("AGV {} 已通过路口: {}", agvId, intersectionCode);
     }
 }

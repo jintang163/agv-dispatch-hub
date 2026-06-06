@@ -58,6 +58,8 @@ public class TaskDispatchService {
     private final ConflictRecordRepository conflictRecordRepository;
     private final PathPlanningService pathPlanningService;
     private final ConflictDetectionService conflictDetectionService;
+    @org.springframework.context.annotation.Lazy
+    private final DeadlockDetectionService deadlockDetectionService;
     private final StringRedisTemplate redisTemplate;
 
     private final TaskQueueComparator taskQueueComparator = new TaskQueueComparator();
@@ -912,5 +914,136 @@ public class TaskDispatchService {
             agvRepository.save(agv);
             log.info("AGV暂停: agvId={}", agvId);
         }
+    }
+
+    @Transactional
+    public PathPlanningResult dynamicReplanTask(String taskId, String blockedNode, String reason, String operator) {
+        Task task = getTaskById(taskId);
+
+        if (task.getStatus() != TaskStatus.EXECUTING && task.getStatus() != TaskStatus.ASSIGNED) {
+            return PathPlanningResult.failure("任务状态不支持重规划: " + task.getStatus());
+        }
+
+        if (blockedNode != null && !blockedNode.isEmpty()) {
+            pathPlanningService.markPathBlocked(blockedNode, reason);
+        }
+
+        PathPlanningResult replanResult = pathPlanningService.dynamicReplan(task, blockedNode);
+
+        if (replanResult.isSuccess()) {
+            String oldPath = task.getPath();
+            task.setPath(pathPlanningService.encodePath(replanResult.getPath()));
+            taskRepository.save(task);
+
+            if (task.getAgvId() != null) {
+                pathPlanningService.releaseAllPath(task.getAgvId());
+                pathPlanningService.occupyPath(task.getAgvId(), replanResult.getPath(),
+                        task.getCurrentStep() != null ? task.getCurrentStep() : 0);
+            }
+
+            recordTaskLog(taskId, task.getAgvId(), "动态重规划",
+                    oldPath, task.getPath(),
+                    reason != null ? reason : "路径阻塞，自动重规划", operator);
+
+            cacheTask(task);
+
+            log.info("任务动态重规划成功: taskId={}, 原路径长度={}, 新路径长度={}",
+                    taskId,
+                    pathPlanningService.decodePath(oldPath).size(),
+                    replanResult.getPath().size());
+        }
+
+        return replanResult;
+    }
+
+    @Transactional
+    public PathPlanningResult replanTaskFromCurrent(String taskId, String operator) {
+        Task task = getTaskById(taskId);
+
+        if (task.getStatus() != TaskStatus.EXECUTING && task.getStatus() != TaskStatus.ASSIGNED) {
+            return PathPlanningResult.failure("任务状态不支持重规划: " + task.getStatus());
+        }
+
+        PathPlanningResult replanResult = pathPlanningService.replanFromCurrentPosition(task);
+
+        if (replanResult.isSuccess()) {
+            String oldPath = task.getPath();
+            task.setPath(pathPlanningService.encodePath(replanResult.getPath()));
+            taskRepository.save(task);
+
+            if (task.getAgvId() != null) {
+                pathPlanningService.releaseAllPath(task.getAgvId());
+                pathPlanningService.occupyPath(task.getAgvId(), replanResult.getPath(),
+                        task.getCurrentStep() != null ? task.getCurrentStep() : 0);
+            }
+
+            recordTaskLog(taskId, task.getAgvId(), "当前位置重规划",
+                    oldPath, task.getPath(),
+                    replanResult.isHasDetour() ? "检测到更优路径，自动重规划" : "路径无变化",
+                    operator);
+
+            cacheTask(task);
+
+            log.info("任务从当前位置重规划: taskId={}, 是否绕行={}", taskId, replanResult.isHasDetour());
+        }
+
+        return replanResult;
+    }
+
+    @Transactional
+    public void handlePathBlocked(String agvId, String blockedNode, String reason) {
+        Agv agv = agvRepository.findById(agvId).orElse(null);
+        if (agv == null) {
+            return;
+        }
+
+        String taskId = agv.getCurrentTaskId();
+        if (taskId == null) {
+            return;
+        }
+
+        log.warn("检测到路径阻塞: agvId={}, blockedNode={}, reason={}", agvId, blockedNode, reason);
+
+        agv.setStatus(AgvStatus.PAUSED);
+        agvRepository.save(agv);
+
+        PathPlanningResult result = dynamicReplanTask(taskId, blockedNode, reason, "system");
+
+        if (result.isSuccess()) {
+            agv.setStatus(AgvStatus.WORKING);
+            agvRepository.save(agv);
+            log.info("路径阻塞已处理，重规划成功: agvId={}", agvId);
+        } else {
+            log.error("路径阻塞处理失败，重规划失败: agvId={}, message={}", agvId, result.getMessage());
+        }
+    }
+
+    public void clearPathBlocked(String nodeCode) {
+        pathPlanningService.clearPathBlocked(nodeCode);
+    }
+
+    public Map<String, String> getAllBlockedPaths() {
+        return pathPlanningService.getBlockedPaths();
+    }
+
+    public Map<String, String> getAllOccupiedPaths() {
+        return pathPlanningService.getOccupiedPaths();
+    }
+
+    public Map<String, String> getAllLockedIntersections() {
+        return pathPlanningService.getLockedIntersections();
+    }
+
+    public List<com.agv.dispatch.common.entity.DeadlockRecord> getCurrentDeadlocks() {
+        return deadlockDetectionService.getUnresolvedDeadlocks();
+    }
+
+    @Transactional
+    public String resolveDeadlockManually(Long deadlockId) {
+        return deadlockDetectionService.resolveDeadlock(deadlockId);
+    }
+
+    public void forceResolveAllDeadlocks() {
+        deadlockDetectionService.resolveAllDeadlocks();
     }
 }

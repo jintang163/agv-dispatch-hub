@@ -53,4 +53,10 @@ public interface TaskRepository extends JpaRepository<Task, String> {
     Double calculateAvgCompletionTime(@Param("startTime") LocalDateTime startTime);
 
     boolean existsByWmsOrderNo(String wmsOrderNo);
+
+    @Query("SELECT t FROM Task t WHERE t.agvId = :agvId " +
+           "AND t.status IN (:statuses) " +
+           "ORDER BY t.createTime DESC")
+    java.util.Optional<Task> findFirstByAgvIdAndStatusIn(@Param("agvId") String agvId,
+                                                          @Param("statuses") java.util.List<com.agv.dispatch.common.enums.TaskStatus> statuses);
 }

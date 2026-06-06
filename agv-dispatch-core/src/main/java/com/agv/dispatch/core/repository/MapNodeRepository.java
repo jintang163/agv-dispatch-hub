@@ -18,4 +18,13 @@ public interface MapNodeRepository extends JpaRepository<MapNode, String> {
 
     @Query("SELECT n FROM MapNode n WHERE n.isTransferStation = true")
     List<MapNode> findTransferStations();
+
+    @Query("SELECT n FROM MapNode n WHERE n.isIntersection = true")
+    List<MapNode> findIntersections();
+
+    @Query("SELECT n FROM MapNode n WHERE n.isPassage = true")
+    List<MapNode> findPassages();
+
+    @Query("SELECT n FROM MapNode n WHERE n.isCriticalPoint = true")
+    List<MapNode> findCriticalPoints();
 }
