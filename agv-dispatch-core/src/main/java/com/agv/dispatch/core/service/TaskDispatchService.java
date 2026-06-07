@@ -8,6 +8,7 @@ import com.agv.dispatch.common.entity.Task;
 import com.agv.dispatch.common.entity.TaskLog;
 import com.agv.dispatch.common.enums.AgvStatus;
 import com.agv.dispatch.common.enums.AlarmType;
+import com.agv.dispatch.common.enums.OperationType;
 import com.agv.dispatch.common.enums.TaskPriority;
 import com.agv.dispatch.common.enums.TaskStatus;
 import com.agv.dispatch.common.enums.TaskType;
@@ -64,6 +65,7 @@ public class TaskDispatchService {
     @org.springframework.context.annotation.Lazy
     private final DeadlockDetectionService deadlockDetectionService;
     private final TaskExecutionService taskExecutionService;
+    private final OperationLogService operationLogService;
     private final StringRedisTemplate redisTemplate;
 
     private final TaskQueueComparator taskQueueComparator = new TaskQueueComparator();
@@ -77,6 +79,7 @@ public class TaskDispatchService {
      */
     @Transactional
     public Task createTask(TaskCreateDTO dto) {
+        long startTime = System.currentTimeMillis();
         Task task = new Task();
         task.setId(IdGenerator.generateId());
         task.setTaskNo(IdGenerator.generateTaskNo());
@@ -99,6 +102,12 @@ public class TaskDispatchService {
         recordTaskLog(saved.getId(), null, "创建任务",
                 null, TaskStatus.PENDING.getDesc(),
                 "WMS创建任务", null);
+
+        String detail = String.format("创建任务：%s，从%s到%s，优先级%s",
+                saved.getTaskNo(), saved.getStartPoint(), saved.getEndPoint(), saved.getPriority().getDesc());
+        operationLogService.logOperation(OperationType.TASK_CREATE,
+                null, null, saved.getId(), saved.getTaskNo(), null, null,
+                detail, true, null, System.currentTimeMillis() - startTime);
 
         log.info("任务创建成功: taskNo={}, priority={}", saved.getTaskNo(), saved.getPriority());
         return saved;
@@ -135,6 +144,7 @@ public class TaskDispatchService {
      * @param operator 操作人
      */
     public void updateTaskPriority(String taskId, TaskPriority newPriority, String operator) {
+        long startTime = System.currentTimeMillis();
         Task task = getTaskById(taskId);
         TaskPriority oldPriority = task.getPriority();
         task.setPriority(newPriority);
@@ -153,6 +163,14 @@ public class TaskDispatchService {
                 "优先级由 " + oldPriority.getDesc() + " 调整为 " + newPriority.getDesc(),
                 operator);
 
+        String detail = String.format("任务插队：%s，优先级由%s调整为%s，操作人：%s",
+                task.getTaskNo(), oldPriority.getDesc(), newPriority.getDesc(), operator);
+        String beforeData = String.format("{\"priority\":\"%s\"}", oldPriority.name());
+        String afterData = String.format("{\"priority\":\"%s\"}", newPriority.name());
+        operationLogService.logOperation(OperationType.TASK_PRIORITY_UPDATE,
+                operator, null, task.getId(), task.getTaskNo(), null, null,
+                detail, true, null, System.currentTimeMillis() - startTime, beforeData, afterData);
+
         log.info("任务优先级更新: taskId={}, {} -> {}", taskId, oldPriority, newPriority);
     }
 
@@ -168,6 +186,7 @@ public class TaskDispatchService {
      */
     @Transactional
     public Task assignTask(String taskId, String agvId, String path, String operator) {
+        long startTime = System.currentTimeMillis();
         // 从缓存获取任务，优先走缓存
         Task task = getTaskById(taskId);
         if (task.getStatus() != TaskStatus.PENDING) {
@@ -225,6 +244,12 @@ public class TaskDispatchService {
 
         // 更新任务缓存，保证缓存一致性
         cacheTask(saved);
+
+        String detail = String.format("任务下发：%s 分配给 %s，操作人：%s",
+                task.getTaskNo(), agv.getAgvNo(), operator);
+        operationLogService.logOperation(OperationType.TASK_DISPATCH,
+                operator, null, task.getId(), task.getTaskNo(), agv.getId(), agv.getAgvNo(),
+                detail, true, null, System.currentTimeMillis() - startTime);
 
         log.info("任务分配成功: taskId={}, agvId={}", taskId, agvId);
         return saved;
@@ -524,14 +549,28 @@ public class TaskDispatchService {
      */
     @Transactional
     public void cancelTask(String taskId, String reason, String operator) {
+        long startTime = System.currentTimeMillis();
         Task task = getTaskById(taskId);
         if (task.getStatus() == TaskStatus.COMPLETED || task.getStatus() == TaskStatus.CANCELLED) {
             throw new IllegalStateException("任务已完成或已取消");
         }
 
+        String taskNo = task.getTaskNo();
+        String agvNo = null;
+        if (task.getAgvId() != null) {
+            agvNo = agvRepository.findById(task.getAgvId())
+                    .map(Agv::getAgvNo).orElse(null);
+        }
+
         // 更新任务状态为已取消（内部会处理AGV和路径释放）
         updateTaskStatus(taskId, TaskStatus.CANCELLED, reason, operator);
         removeFromTaskQueue(taskId);
+
+        String detail = String.format("取消任务：%s，原因：%s，操作人：%s",
+                taskNo, reason != null ? reason : "手动取消", operator);
+        operationLogService.logOperation(OperationType.TASK_CANCEL,
+                operator, null, taskId, taskNo, task.getAgvId(), agvNo,
+                detail, true, null, System.currentTimeMillis() - startTime);
     }
 
     /**
@@ -546,6 +585,7 @@ public class TaskDispatchService {
      */
     @Transactional
     public Task reassignTask(String taskId, String targetAgvId, String reason, String operator) {
+        long startTime = System.currentTimeMillis();
         Task task = getTaskById(taskId);
         String oldAgvId = task.getAgvId();
 
@@ -577,6 +617,15 @@ public class TaskDispatchService {
         recordTaskLog(taskId, oldAgvId, "任务重分配",
                 task.getStatus().getDesc(), TaskStatus.PENDING.getDesc(),
                 reason != null ? reason : "AGV故障或路径阻塞，返回待分配队列", operator);
+
+        String oldAgvNo = oldAgvId != null ? agvRepository.findById(oldAgvId)
+                .map(Agv::getAgvNo).orElse(null) : null;
+        String detail = String.format("任务重分配：%s，原AGV：%s，原因：%s，操作人：%s",
+                task.getTaskNo(), oldAgvNo != null ? oldAgvNo : "无",
+                reason != null ? reason : "AGV故障或路径阻塞", operator);
+        operationLogService.logOperation(OperationType.TASK_REASSIGN,
+                operator, null, task.getId(), task.getTaskNo(), oldAgvId, oldAgvNo,
+                detail, true, null, System.currentTimeMillis() - startTime);
 
         // 如果指定了目标AGV，直接分配
         if (targetAgvId != null && !targetAgvId.isEmpty()) {

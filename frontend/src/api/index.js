@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { ElMessage } from 'element-plus'
 
 const request = axios.create({
   baseURL: '/api/v1',
@@ -6,7 +7,13 @@ const request = axios.create({
 })
 
 request.interceptors.request.use(
-  config => config,
+  config => {
+    const token = localStorage.getItem('token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
+    return config
+  },
   error => Promise.reject(error)
 )
 
@@ -16,9 +23,34 @@ request.interceptors.response.use(
     if (res.code === 200) {
       return res.data
     }
+    if (res.code === 401) {
+      ElMessage.error('登录已过期，请重新登录')
+      localStorage.removeItem('token')
+      localStorage.removeItem('userInfo')
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+      return Promise.reject(new Error(res.message || '登录已过期'))
+    }
+    if (res.code === 403) {
+      ElMessage.error('没有权限执行此操作')
+      return Promise.reject(new Error(res.message || '没有权限'))
+    }
     return Promise.reject(new Error(res.message || '请求失败'))
   },
-  error => Promise.reject(error)
+  error => {
+    if (error.response?.status === 401) {
+      ElMessage.error('登录已过期，请重新登录')
+      localStorage.removeItem('token')
+      localStorage.removeItem('userInfo')
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    } else if (error.response?.status === 403) {
+      ElMessage.error('没有权限执行此操作')
+    }
+    return Promise.reject(error)
+  }
 )
 
 export const taskApi = {
@@ -224,6 +256,36 @@ export const pathPlanningApi = {
   markPathBlocked: (nodeCode, reason) => request.post(`/path-planning/blocked/${nodeCode}`, null, { params: { reason } }),
   clearPathBlocked: (nodeCode) => request.delete(`/path-planning/blocked/${nodeCode}`),
   initGraph: () => request.post('/path-planning/graph/init')
+}
+
+export const authApi = {
+  login: (data) => request.post('/auth/login', data),
+  logout: () => request.post('/auth/logout'),
+  getCurrentUser: () => request.get('/auth/me'),
+  validateToken: () => request.get('/auth/validate')
+}
+
+export const userApi = {
+  list: (params) => request.get('/users', { params }),
+  getById: (id) => request.get(`/users/${id}`),
+  getByUsername: (username) => request.get(`/users/username/${username}`),
+  getAll: () => request.get('/users/all'),
+  getByRole: (role) => request.get(`/users/role/${role}`),
+  create: (data) => request.post('/users', data),
+  update: (id, data) => request.put(`/users/${id}`, data),
+  delete: (id) => request.delete(`/users/${id}`),
+  checkUsername: (username) => request.get('/users/check-username', { params: { username } }),
+  getRoles: () => request.get('/users/roles')
+}
+
+export const operationLogApi = {
+  list: (params) => request.get('/operation-logs', { params }),
+  getById: (id) => request.get(`/operation-logs/${id}`),
+  getRecent: (limit) => request.get('/operation-logs/recent', { params: { limit } }),
+  getByUser: (operator) => request.get(`/operation-logs/user/${operator}`),
+  getStatistics: (params) => request.get('/operation-logs/statistics', { params }),
+  getTypes: () => request.get('/operation-logs/types'),
+  export: (params) => request.get('/operation-logs/export', { params })
 }
 
 export const websocketService = {

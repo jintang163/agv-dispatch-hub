@@ -7,10 +7,12 @@ import com.agv.dispatch.common.dto.Result;
 import com.agv.dispatch.common.entity.Agv;
 import com.agv.dispatch.common.entity.Task;
 import com.agv.dispatch.common.enums.AgvStatus;
+import com.agv.dispatch.common.enums.OperationType;
 import com.agv.dispatch.common.enums.TaskStatus;
 import com.agv.dispatch.core.repository.AgvRepository;
 import com.agv.dispatch.core.repository.TaskRepository;
 import com.agv.dispatch.core.service.AgvStatusService;
+import com.agv.dispatch.core.service.OperationLogService;
 import com.agv.dispatch.core.service.TaskDispatchService;
 import com.agv.dispatch.mqtt.service.MqttMessageService;
 import com.alibaba.fastjson2.JSON;
@@ -38,6 +40,7 @@ public class AgvController {
     private final TaskRepository taskRepository;
     private final TaskDispatchService taskDispatchService;
     private final AgvStatusService agvStatusService;
+    private final OperationLogService operationLogService;
     private final MqttMessageService mqttMessageService;
     private final StringRedisTemplate redisTemplate;
 
@@ -125,9 +128,16 @@ public class AgvController {
     public Result<Void> pauseAgv(
             @PathVariable String agvId,
             @Parameter(description = "操作员") @RequestParam(required = false) String operator) {
+        long startTime = System.currentTimeMillis();
         taskDispatchService.pauseAgv(agvId, operator);
-        agvRepository.findById(agvId).ifPresent(agv ->
-                mqttMessageService.sendPause(agv.getAgvNo()));
+        Agv agv = agvRepository.findById(agvId).orElse(null);
+        if (agv != null) {
+            mqttMessageService.sendPause(agv.getAgvNo());
+            String detail = String.format("手动干预：暂停AGV %s，操作人：%s", agv.getAgvNo(), operator);
+            operationLogService.logOperation(OperationType.AGV_PAUSE,
+                    operator, null, null, null, agv.getId(), agv.getAgvNo(),
+                    detail, true, null, System.currentTimeMillis() - startTime);
+        }
         return Result.success();
     }
 
@@ -136,9 +146,16 @@ public class AgvController {
     public Result<Void> resumeAgv(
             @PathVariable String agvId,
             @Parameter(description = "操作员") @RequestParam(required = false) String operator) {
+        long startTime = System.currentTimeMillis();
         taskDispatchService.resumeAgv(agvId, operator);
-        agvRepository.findById(agvId).ifPresent(agv ->
-                mqttMessageService.sendResume(agv.getAgvNo()));
+        Agv agv = agvRepository.findById(agvId).orElse(null);
+        if (agv != null) {
+            mqttMessageService.sendResume(agv.getAgvNo());
+            String detail = String.format("手动干预：恢复AGV %s，操作人：%s", agv.getAgvNo(), operator);
+            operationLogService.logOperation(OperationType.AGV_RESUME,
+                    operator, null, null, null, agv.getId(), agv.getAgvNo(),
+                    detail, true, null, System.currentTimeMillis() - startTime);
+        }
         return Result.success();
     }
 
@@ -147,11 +164,19 @@ public class AgvController {
     public Result<Void> emergencyStop(
             @PathVariable String agvId,
             @Parameter(description = "操作员") @RequestParam(required = false) String operator) {
-        agvRepository.findById(agvId).ifPresent(agv -> {
+        long startTime = System.currentTimeMillis();
+        Agv agv = agvRepository.findById(agvId).orElse(null);
+        if (agv != null) {
+            String beforeData = String.format("{\"status\":\"%s\"}", agv.getStatus().name());
             agv.setStatus(AgvStatus.PAUSED);
             agvRepository.save(agv);
             mqttMessageService.sendEmergencyStop(agv.getAgvNo());
-        });
+            String detail = String.format("手动干预：AGV %s 紧急停车，操作人：%s", agv.getAgvNo(), operator);
+            String afterData = String.format("{\"status\":\"%s\"}", AgvStatus.PAUSED.name());
+            operationLogService.logOperation(OperationType.AGV_STOP,
+                    operator, null, null, null, agv.getId(), agv.getAgvNo(),
+                    detail, true, null, System.currentTimeMillis() - startTime, beforeData, afterData);
+        }
         return Result.success();
     }
 
@@ -161,7 +186,10 @@ public class AgvController {
             @PathVariable String agvId,
             @Parameter(description = "充电站编码") @RequestParam String chargingStation,
             @Parameter(description = "操作员") @RequestParam(required = false) String operator) {
-        agvRepository.findById(agvId).ifPresent(agv -> {
+        long startTime = System.currentTimeMillis();
+        Agv agv = agvRepository.findById(agvId).orElse(null);
+        if (agv != null) {
+            String beforeData = String.format("{\"status\":\"%s\"}", agv.getStatus().name());
             if (agv.getCurrentTaskId() != null) {
                 Task task = taskRepository.findById(agv.getCurrentTaskId()).orElse(null);
                 if (task != null && task.getStatus() != TaskStatus.COMPLETED
@@ -172,7 +200,13 @@ public class AgvController {
             agv.setStatus(AgvStatus.CHARGING);
             agvRepository.save(agv);
             mqttMessageService.sendGoToCharge(agv.getAgvNo(), chargingStation);
-        });
+            String detail = String.format("手动干预：呼叫AGV %s 前往充电站 %s，操作人：%s",
+                    agv.getAgvNo(), chargingStation, operator);
+            String afterData = String.format("{\"status\":\"%s\"}", AgvStatus.CHARGING.name());
+            operationLogService.logOperation(OperationType.AGV_CHARGE,
+                    operator, null, null, null, agv.getId(), agv.getAgvNo(),
+                    detail, true, null, System.currentTimeMillis() - startTime, beforeData, afterData);
+        }
         return Result.success();
     }
 
