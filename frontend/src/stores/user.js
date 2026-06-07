@@ -60,7 +60,18 @@ export const useUserStore = defineStore('user', () => {
   function hasPermission(permission) {
     if (!permission) return true
     if (isAdmin.value) return true
-    return permissions.value.includes(permission)
+    if (isDispatcher.value) {
+      const forbiddenPermissions = ['user:manage', 'user:create', 'user:update', 'user:delete']
+      return !forbiddenPermissions.includes(permission)
+    }
+    if (isReadOnly.value) {
+      return permission.endsWith(':view') ||
+             permission === 'task:view' ||
+             permission === 'agv:view' ||
+             permission === 'map:view' ||
+             permission === 'log:view'
+    }
+    return false
   }
 
   function hasAnyPermission(permissionList) {

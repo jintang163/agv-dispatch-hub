@@ -7,11 +7,11 @@
           <el-icon><SetUp /></el-icon>
           初始化地图
         </el-button>
-        <el-button type="primary" @click="handleDetectConflicts">
+        <el-button type="primary" @click="handleDetectConflicts" v-if="userStore.hasPermission('dispatch:conflict')">
           <el-icon><Warning /></el-icon>
           检测冲突
         </el-button>
-        <el-button type="success" @click="handleResolveAll">
+        <el-button type="success" @click="handleResolveAll" v-if="userStore.hasPermission('dispatch:conflict')">
           <el-icon><Check /></el-icon>
           解决全部冲突
         </el-button>
@@ -146,7 +146,7 @@
             <el-table-column label="操作" width="150" fixed="right">
               <template #default="{ row }">
                 <el-button
-                  v-if="row.status === 'PENDING'"
+                  v-if="row.status === 'PENDING' && userStore.hasPermission('dispatch:conflict')"
                   type="primary"
                   size="small"
                   @click="handleResolveConflict(row)"
@@ -285,6 +285,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { SetUp, Warning, Check } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { dispatchApi, websocketService } from '@/api'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
 
 const conflictLoading = ref(false)
 const conflictList = ref([])

@@ -140,9 +140,6 @@
             placeholder="请输入处理说明"
           />
         </el-form-item>
-        <el-form-item label="处理人" prop="handler">
-          <el-input v-model="handleForm.handler" placeholder="请输入处理人姓名" />
-        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="handleDialogVisible = false">取消</el-button>
@@ -206,8 +203,7 @@ const alertListRef = ref(null)
 
 const handleForm = ref({
   handleResult: 'resolved',
-  remark: '',
-  handler: ''
+  remark: ''
 })
 
 const filteredAlerts = computed(() => {
@@ -249,21 +245,15 @@ const showHandleResult = (alert) => {
 }
 
 const confirmHandle = async () => {
-  if (!handleForm.value.handler) {
-    ElMessage.warning('请输入处理人姓名')
-    return
-  }
   try {
     await dispatchApi.handleAlarm(
       currentAlert.value.id,
-      `${handleForm.value.handleResult}: ${handleForm.value.remark}`,
-      handleForm.value.handler
+      `${handleForm.value.handleResult}: ${handleForm.value.remark}`
     )
     if (currentAlert.value) {
       currentAlert.value.handled = true
       currentAlert.value.handleTime = new Date().toISOString()
       currentAlert.value.handleResult = handleForm.value.handleResult
-      currentAlert.value.handler = handleForm.value.handler
     }
     ElMessage.success('告警处理成功')
     handleDialogVisible.value = false

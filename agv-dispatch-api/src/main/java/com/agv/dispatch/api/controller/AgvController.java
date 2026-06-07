@@ -1,5 +1,6 @@
 package com.agv.dispatch.api.controller;
 
+import com.agv.dispatch.common.context.UserContext;
 import com.agv.dispatch.common.dto.AgvRegisterDTO;
 import com.agv.dispatch.common.dto.AgvStatusReportDTO;
 import com.agv.dispatch.common.dto.AgvUpdateDTO;
@@ -12,6 +13,7 @@ import com.agv.dispatch.common.enums.TaskStatus;
 import com.agv.dispatch.core.repository.AgvRepository;
 import com.agv.dispatch.core.repository.TaskRepository;
 import com.agv.dispatch.core.service.AgvStatusService;
+import com.agv.dispatch.core.service.AuthService;
 import com.agv.dispatch.core.service.OperationLogService;
 import com.agv.dispatch.core.service.TaskDispatchService;
 import com.agv.dispatch.mqtt.service.MqttMessageService;
@@ -41,12 +43,16 @@ public class AgvController {
     private final TaskDispatchService taskDispatchService;
     private final AgvStatusService agvStatusService;
     private final OperationLogService operationLogService;
+    private final AuthService authService;
     private final MqttMessageService mqttMessageService;
     private final StringRedisTemplate redisTemplate;
 
     @PostMapping
     @Operation(summary = "注册AGV")
     public Result<Agv> registerAgv(@Valid @RequestBody AgvRegisterDTO dto) {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有控制AGV的权限");
+        }
         return Result.success(agvStatusService.registerAgv(dto));
     }
 
@@ -55,12 +61,18 @@ public class AgvController {
     public Result<Agv> updateAgv(
             @PathVariable String agvId,
             @RequestBody AgvUpdateDTO dto) {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有控制AGV的权限");
+        }
         return Result.success(agvStatusService.updateAgv(agvId, dto));
     }
 
     @DeleteMapping("/{agvId}")
     @Operation(summary = "删除AGV")
     public Result<Void> deleteAgv(@PathVariable String agvId) {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有控制AGV的权限");
+        }
         agvStatusService.deleteAgv(agvId);
         return Result.success();
     }
@@ -74,6 +86,9 @@ public class AgvController {
     @PostMapping("/{agvId}/clear-fault")
     @Operation(summary = "清除AGV故障")
     public Result<Void> clearFault(@PathVariable String agvId) {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有控制AGV的权限");
+        }
         agvStatusService.clearFault(agvId);
         return Result.success();
     }
@@ -82,6 +97,9 @@ public class AgvController {
     @Operation(summary = "查询AGV列表")
     public Result<List<Agv>> getAgvList(
             @Parameter(description = "AGV状态") @RequestParam(required = false) AgvStatus status) {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看AGV的权限");
+        }
         List<Agv> agvs;
         if (status != null) {
             agvs = agvStatusService.getAgvsByStatus(status);
@@ -94,6 +112,9 @@ public class AgvController {
     @GetMapping("/{agvId}")
     @Operation(summary = "查询AGV详情")
     public Result<Agv> getAgvById(@PathVariable String agvId) {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看AGV的权限");
+        }
         try {
             return Result.success(agvStatusService.getAgvById(agvId));
         } catch (IllegalArgumentException e) {
@@ -104,6 +125,9 @@ public class AgvController {
     @GetMapping("/{agvId}/current-task")
     @Operation(summary = "获取AGV当前任务")
     public Result<Task> getCurrentTask(@PathVariable String agvId) {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看AGV的权限");
+        }
         return agvRepository.findById(agvId)
                 .map(agv -> {
                     if (agv.getCurrentTaskId() != null) {
@@ -119,51 +143,68 @@ public class AgvController {
     @GetMapping("/available")
     @Operation(summary = "获取可用AGV列表")
     public Result<List<Agv>> getAvailableAgvs() {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看AGV的权限");
+        }
         List<Agv> agvs = agvRepository.findAvailableAgvsOrdered();
         return Result.success(agvs);
     }
 
+    @GetMapping("/statistics")
+    @Operation(summary = "获取AGV统计信息")
+    public Result<Map<String, Object>> getAgvStatistics() {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看AGV的权限");
+        }
+        return Result.success(agvStatusService.getAgvStatistics());
+    }
+
     @PostMapping("/{agvId}/pause")
     @Operation(summary = "暂停AGV")
-    public Result<Void> pauseAgv(
-            @PathVariable String agvId,
-            @Parameter(description = "操作员") @RequestParam(required = false) String operator) {
+    public Result<Void> pauseAgv(@PathVariable String agvId) {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有控制AGV的权限");
+        }
         long startTime = System.currentTimeMillis();
+        String operator = UserContext.getUsername();
         taskDispatchService.pauseAgv(agvId, operator);
         Agv agv = agvRepository.findById(agvId).orElse(null);
         if (agv != null) {
             mqttMessageService.sendPause(agv.getAgvNo());
-            String detail = String.format("手动干预：暂停AGV %s，操作人：%s", agv.getAgvNo(), operator);
+            String detail = String.format("手动干预：暂停AGV %s", agv.getAgvNo());
             operationLogService.logOperation(OperationType.AGV_PAUSE,
-                    operator, null, null, null, agv.getId(), agv.getAgvNo(),
-                    detail, true, null, System.currentTimeMillis() - startTime);
+                    null, null, agv.getId(), agv.getAgvNo(),
+                    detail, true, System.currentTimeMillis() - startTime);
         }
         return Result.success();
     }
 
     @PostMapping("/{agvId}/resume")
     @Operation(summary = "恢复AGV")
-    public Result<Void> resumeAgv(
-            @PathVariable String agvId,
-            @Parameter(description = "操作员") @RequestParam(required = false) String operator) {
+    public Result<Void> resumeAgv(@PathVariable String agvId) {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有控制AGV的权限");
+        }
         long startTime = System.currentTimeMillis();
+        String operator = UserContext.getUsername();
         taskDispatchService.resumeAgv(agvId, operator);
         Agv agv = agvRepository.findById(agvId).orElse(null);
         if (agv != null) {
             mqttMessageService.sendResume(agv.getAgvNo());
-            String detail = String.format("手动干预：恢复AGV %s，操作人：%s", agv.getAgvNo(), operator);
+            String detail = String.format("手动干预：恢复AGV %s", agv.getAgvNo());
             operationLogService.logOperation(OperationType.AGV_RESUME,
-                    operator, null, null, null, agv.getId(), agv.getAgvNo(),
-                    detail, true, null, System.currentTimeMillis() - startTime);
+                    null, null, agv.getId(), agv.getAgvNo(),
+                    detail, true, System.currentTimeMillis() - startTime);
         }
         return Result.success();
     }
 
     @PostMapping("/{agvId}/stop")
     @Operation(summary = "紧急停车")
-    public Result<Void> emergencyStop(
-            @PathVariable String agvId,
-            @Parameter(description = "操作员") @RequestParam(required = false) String operator) {
+    public Result<Void> emergencyStop(@PathVariable String agvId) {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有控制AGV的权限");
+        }
         long startTime = System.currentTimeMillis();
         Agv agv = agvRepository.findById(agvId).orElse(null);
         if (agv != null) {
@@ -171,11 +212,11 @@ public class AgvController {
             agv.setStatus(AgvStatus.PAUSED);
             agvRepository.save(agv);
             mqttMessageService.sendEmergencyStop(agv.getAgvNo());
-            String detail = String.format("手动干预：AGV %s 紧急停车，操作人：%s", agv.getAgvNo(), operator);
+            String detail = String.format("手动干预：AGV %s 紧急停车", agv.getAgvNo());
             String afterData = String.format("{\"status\":\"%s\"}", AgvStatus.PAUSED.name());
             operationLogService.logOperation(OperationType.AGV_STOP,
-                    operator, null, null, null, agv.getId(), agv.getAgvNo(),
-                    detail, true, null, System.currentTimeMillis() - startTime, beforeData, afterData);
+                    null, null, agv.getId(), agv.getAgvNo(),
+                    detail, true, System.currentTimeMillis() - startTime, beforeData, afterData);
         }
         return Result.success();
     }
@@ -184,9 +225,12 @@ public class AgvController {
     @Operation(summary = "呼叫AGV去充电")
     public Result<Void> goToCharge(
             @PathVariable String agvId,
-            @Parameter(description = "充电站编码") @RequestParam String chargingStation,
-            @Parameter(description = "操作员") @RequestParam(required = false) String operator) {
+            @Parameter(description = "充电站编码") @RequestParam String chargingStation) {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有控制AGV的权限");
+        }
         long startTime = System.currentTimeMillis();
+        String operator = UserContext.getUsername();
         Agv agv = agvRepository.findById(agvId).orElse(null);
         if (agv != null) {
             String beforeData = String.format("{\"status\":\"%s\"}", agv.getStatus().name());
@@ -200,19 +244,13 @@ public class AgvController {
             agv.setStatus(AgvStatus.CHARGING);
             agvRepository.save(agv);
             mqttMessageService.sendGoToCharge(agv.getAgvNo(), chargingStation);
-            String detail = String.format("手动干预：呼叫AGV %s 前往充电站 %s，操作人：%s",
-                    agv.getAgvNo(), chargingStation, operator);
+            String detail = String.format("手动干预：呼叫AGV %s 前往充电站 %s",
+                    agv.getAgvNo(), chargingStation);
             String afterData = String.format("{\"status\":\"%s\"}", AgvStatus.CHARGING.name());
             operationLogService.logOperation(OperationType.AGV_CHARGE,
-                    operator, null, null, null, agv.getId(), agv.getAgvNo(),
-                    detail, true, null, System.currentTimeMillis() - startTime, beforeData, afterData);
+                    null, null, agv.getId(), agv.getAgvNo(),
+                    detail, true, System.currentTimeMillis() - startTime, beforeData, afterData);
         }
         return Result.success();
-    }
-
-    @GetMapping("/statistics")
-    @Operation(summary = "获取AGV统计信息")
-    public Result<Map<String, Object>> getAgvStatistics() {
-        return Result.success(agvStatusService.getAgvStatistics());
     }
 }

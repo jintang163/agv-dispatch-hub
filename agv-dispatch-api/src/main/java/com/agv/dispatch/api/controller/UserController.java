@@ -43,6 +43,9 @@ public class UserController {
             @Parameter(description = "状态过滤") @RequestParam(required = false) Integer status,
             @Parameter(description = "页码") @RequestParam(defaultValue = "1") int pageNum,
             @Parameter(description = "每页条数") @RequestParam(defaultValue = "10") int pageSize) {
+        if (!authService.hasPermission("user:view")) {
+            return Result.fail(403, "没有查看用户的权限");
+        }
         Pageable pageable = PageRequest.of(pageNum - 1, pageSize, Sort.by(Sort.Direction.DESC, "createTime"));
         Page<SysUser> page = userService.queryUsers(keyword, role, status, pageable);
         return Result.success(page);
@@ -51,6 +54,9 @@ public class UserController {
     @GetMapping("/{id}")
     @Operation(summary = "获取用户详情")
     public Result<SysUser> getUserById(@Parameter(description = "用户ID") @PathVariable Long id) {
+        if (!authService.hasPermission("user:view")) {
+            return Result.fail(403, "没有查看用户的权限");
+        }
         SysUser user = userService.getUserById(id);
         return Result.success(user);
     }
@@ -58,6 +64,9 @@ public class UserController {
     @GetMapping("/username/{username}")
     @Operation(summary = "根据用户名获取用户")
     public Result<SysUser> getUserByUsername(@Parameter(description = "用户名") @PathVariable String username) {
+        if (!authService.hasPermission("user:view")) {
+            return Result.fail(403, "没有查看用户的权限");
+        }
         SysUser user = userService.getUserByUsername(username);
         return Result.success(user);
     }
@@ -65,6 +74,9 @@ public class UserController {
     @GetMapping("/all")
     @Operation(summary = "获取所有用户列表")
     public Result<List<SysUser>> getAllUsers() {
+        if (!authService.hasPermission("user:view")) {
+            return Result.fail(403, "没有查看用户的权限");
+        }
         List<SysUser> users = userService.getAllUsers();
         return Result.success(users);
     }
@@ -72,6 +84,9 @@ public class UserController {
     @GetMapping("/role/{role}")
     @Operation(summary = "根据角色获取用户列表")
     public Result<List<SysUser>> getUsersByRole(@Parameter(description = "角色") @PathVariable RoleEnum role) {
+        if (!authService.hasPermission("user:view")) {
+            return Result.fail(403, "没有查看用户的权限");
+        }
         List<SysUser> users = userService.getUsersByRole(role);
         return Result.success(users);
     }

@@ -2,7 +2,7 @@
   <div class="page-container">
     <div class="page-header">
       <h2>任务管理</h2>
-      <el-button type="primary" @click="showCreateDialog">
+      <el-button type="primary" @click="showCreateDialog" v-if="userStore.hasPermission('task:create')">
         <el-icon><Plus /></el-icon>
         新建任务
       </el-button>
@@ -101,7 +101,7 @@
           <el-button type="primary" link @click="showDetail(row)">详情</el-button>
           <el-button type="primary" link @click="showLogs(row)">日志</el-button>
           <el-button
-            v-if="row.status === 'PENDING'"
+            v-if="row.status === 'PENDING' && userStore.hasPermission('task:dispatch')"
             type="success"
             link
             @click="handleAssign(row)"
@@ -109,7 +109,7 @@
             分配
           </el-button>
           <el-button
-            v-if="row.status === 'PENDING' || row.status === 'ASSIGNED'"
+            v-if="(row.status === 'PENDING' || row.status === 'ASSIGNED') && userStore.hasPermission('task:update')"
             type="primary"
             link
             @click="handleUpdatePriority(row)"
@@ -125,7 +125,7 @@
             重分配
           </el-button>
           <el-button
-            v-if="row.status !== 'COMPLETED' && row.status !== 'CANCELLED'"
+            v-if="row.status !== 'COMPLETED' && row.status !== 'CANCELLED' && userStore.hasPermission('task:cancel')"
             type="danger"
             link
             @click="handleCancel(row)"
@@ -402,6 +402,9 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { taskApi, agvApi } from '@/api'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
 
 const loading = ref(false)
 const taskList = ref([])

@@ -105,15 +105,14 @@ export function useMonitor() {
     }
   }
 
-  const handleAlarm = async (alarmId, handleResult, handler = 'admin') => {
+  const handleAlarm = async (alarmId, handleResult) => {
     try {
-      await dispatchApi.handleAlarm(alarmId, handleResult, handler)
+      await dispatchApi.handleAlarm(alarmId, handleResult)
       const alarm = alarms.value.find(a => a.id === alarmId)
       if (alarm) {
         alarm.handled = true
         alarm.handleTime = new Date().toISOString()
         alarm.handleResult = handleResult
-        alarm.handler = handler
       }
       ElMessage.success('告警处理成功')
       return true

@@ -366,7 +366,7 @@ const handlePauseTask = async (task) => {
       '暂停确认',
       { type: 'warning' }
     )
-    await dispatchApi.pauseTask(task.id, 'admin', '手动暂停')
+    await dispatchApi.pauseTask(task.id, '手动暂停')
     ElMessage.success('任务已暂停')
     emit('taskUpdated')
   } catch (e) {
@@ -383,7 +383,7 @@ const handleCancelTask = async (task) => {
       '取消确认',
       { type: 'error', confirmButtonText: '确认取消' }
     )
-    await dispatchApi.cancelTask(task.id, 'admin', '手动取消')
+    await dispatchApi.cancelTask(task.id, '手动取消')
     ElMessage.success('任务已取消')
     emit('taskUpdated')
   } catch (e) {

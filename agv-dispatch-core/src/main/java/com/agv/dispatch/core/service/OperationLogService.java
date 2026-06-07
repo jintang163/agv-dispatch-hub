@@ -1,5 +1,6 @@
 package com.agv.dispatch.core.service;
 
+import com.agv.dispatch.common.context.UserContext;
 import com.agv.dispatch.common.entity.OperationLog;
 import com.agv.dispatch.common.enums.OperationType;
 import com.agv.dispatch.common.util.JsonUtil;
@@ -15,6 +16,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -128,6 +130,53 @@ public class OperationLogService {
         } catch (Exception e) {
             log.error("记录操作日志失败", e);
         }
+    }
+
+    @Async
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void logOperation(OperationType type,
+                             String taskId, String taskNo, String agvId, String agvNo,
+                             String detail, boolean success, String errorMessage, Long executeTime,
+                             String beforeData, String afterData) {
+        try {
+            String operator = UserContext.getUsername();
+            String operatorName = UserContext.getRealName();
+            String operationIp = UserContext.getIp();
+
+            OperationLog opLog = OperationLog.create(type, operator)
+                    .operatorName(operatorName)
+                    .operationIp(operationIp)
+                    .taskId(taskId)
+                    .taskNo(taskNo)
+                    .agvId(agvId)
+                    .agvNo(agvNo)
+                    .detail(detail)
+                    .success(success)
+                    .error(errorMessage)
+                    .executeTime(executeTime)
+                    .beforeData(beforeData)
+                    .afterData(afterData);
+            operationLogRepository.save(opLog);
+        } catch (Exception e) {
+            log.error("记录操作日志失败", e);
+        }
+    }
+
+    @Async
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void logOperation(OperationType type,
+                             String taskId, String taskNo, String agvId, String agvNo,
+                             String detail, boolean success, Long executeTime,
+                             String beforeData, String afterData) {
+        logOperation(type, taskId, taskNo, agvId, agvNo, detail, success, null, executeTime, beforeData, afterData);
+    }
+
+    @Async
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void logOperation(OperationType type,
+                             String taskId, String taskNo, String agvId, String agvNo,
+                             String detail, boolean success, Long executeTime) {
+        logOperation(type, taskId, taskNo, agvId, agvNo, detail, success, null, executeTime, null, null);
     }
 
     public Page<OperationLog> queryLogs(String operator, OperationType operationType,

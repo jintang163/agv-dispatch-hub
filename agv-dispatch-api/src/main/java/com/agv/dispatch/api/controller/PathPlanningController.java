@@ -29,6 +29,7 @@ public class PathPlanningController {
 
     private final PathPlanningService pathPlanningService;
     private final ConflictDetectionService conflictDetectionService;
+    private final AuthService authService;
 
     // ==================== 路径规划 ====================
 
@@ -48,6 +49,9 @@ public class PathPlanningController {
             @Parameter(description = "终点节点编号") @RequestParam String endPoint,
             @Parameter(description = "算法类型: A* 或 DIJKSTRA, 默认 A*")
             @RequestParam(defaultValue = "A*") String algorithm) {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看路径规划的权限");
+        }
         PathPlanningResult result = pathPlanningService.planPathWithAlgorithm(startPoint, endPoint, algorithm);
         return Result.success(result);
     }
@@ -67,6 +71,9 @@ public class PathPlanningController {
             @Parameter(description = "起点节点编号") @RequestParam String startPoint,
             @Parameter(description = "终点节点编号") @RequestParam String endPoint,
             @Parameter(description = "需要避开的节点列表") @RequestBody Set<String> avoidNodes) {
+        if (!authService.hasPermission("task:dispatch")) {
+            return Result.fail(403, "没有路径规划的权限");
+        }
         PathPlanningResult result = pathPlanningService.planPathWithDetour(startPoint, endPoint, avoidNodes);
         return Result.success(result);
     }
@@ -81,6 +88,9 @@ public class PathPlanningController {
     @Operation(summary = "计算路径长度", description = "计算路径的总长度（米）")
     public Result<Double> calculatePathDistance(
             @Parameter(description = "路径节点列表") @RequestBody List<String> path) {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看路径信息的权限");
+        }
         double distance = pathPlanningService.calculatePathDistance(path);
         return Result.success(distance);
     }
@@ -96,6 +106,9 @@ public class PathPlanningController {
     @Operation(summary = "估算路径时间", description = "估算路径的预计行驶时间（秒），考虑节点限速、路口惩罚等因素")
     public Result<Double> estimateTravelTime(
             @Parameter(description = "路径节点列表") @RequestBody List<String> path) {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看路径信息的权限");
+        }
         double time = pathPlanningService.estimateTravelTime(path);
         return Result.success(time);
     }
@@ -112,6 +125,9 @@ public class PathPlanningController {
     public Result<List<String>> getConflictNodes(
             @Parameter(description = "路径1（节点编码，逗号分隔）") @RequestParam String path1,
             @Parameter(description = "路径2（节点编码，逗号分隔）") @RequestParam String path2) {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看路径信息的权限");
+        }
         List<String> list1 = pathPlanningService.decodePath(path1);
         List<String> list2 = pathPlanningService.decodePath(path2);
         List<String> conflicts = pathPlanningService.getConflictNodes(list1, list2);
@@ -162,6 +178,9 @@ public class PathPlanningController {
     @Operation(summary = "获取节点锁持有者", description = "获取当前持有指定节点锁的AGV ID")
     public Result<String> getNodeLockHolder(
             @Parameter(description = "节点编号") @PathVariable String nodeCode) {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看节点信息的权限");
+        }
         String holder = pathPlanningService.getNodeLockHolder(nodeCode);
         return Result.success(holder);
     }
@@ -208,6 +227,9 @@ public class PathPlanningController {
     @GetMapping("/occupied")
     @Operation(summary = "获取被占用的路径节点", description = "获取所有被AGV占用的路径节点")
     public Result<Map<String, String>> getOccupiedPaths() {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看节点信息的权限");
+        }
         Map<String, String> occupied = pathPlanningService.getOccupiedPaths();
         return Result.success(occupied);
     }
@@ -220,6 +242,9 @@ public class PathPlanningController {
     @GetMapping("/blocked")
     @Operation(summary = "获取被阻塞的路径节点", description = "获取所有被标记为阻塞的节点")
     public Result<Map<String, String>> getBlockedPaths() {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看节点信息的权限");
+        }
         Map<String, String> blocked = pathPlanningService.getBlockedPaths();
         return Result.success(blocked);
     }
@@ -232,6 +257,9 @@ public class PathPlanningController {
     @GetMapping("/locked-intersections")
     @Operation(summary = "获取被锁定的路口", description = "获取所有被AGV锁定的路口")
     public Result<Map<String, String>> getLockedIntersections() {
+        if (!authService.hasPermission("agv:view")) {
+            return Result.fail(403, "没有查看节点信息的权限");
+        }
         Map<String, String> locked = pathPlanningService.getLockedIntersections();
         return Result.success(locked);
     }
@@ -245,6 +273,9 @@ public class PathPlanningController {
     @PostMapping("/graph/init")
     @Operation(summary = "初始化地图拓扑图", description = "从数据库加载所有节点和连接关系，构建拓扑图")
     public Result<Void> initGraph() {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有地图管理的权限");
+        }
         pathPlanningService.initGraph();
         return Result.success();
     }
@@ -256,6 +287,9 @@ public class PathPlanningController {
     @PostMapping("/graph/refresh")
     @Operation(summary = "刷新节点缓存", description = "重新从数据库加载节点信息到缓存")
     public Result<Void> refreshNodeCache() {
+        if (!authService.hasPermission("agv:control")) {
+            return Result.fail(403, "没有地图管理的权限");
+        }
         pathPlanningService.refreshNodeCache();
         return Result.success();
     }

@@ -168,7 +168,7 @@
           <template #default="{ row }">
             <el-button type="primary" link @click="showDetail(row)">详情</el-button>
             <el-button
-              v-if="row.status === 'WORKING'"
+              v-if="row.status === 'WORKING' && userStore.hasPermission('agv:control')"
               type="warning"
               link
               @click="handlePause(row)"
@@ -176,7 +176,7 @@
               暂停
             </el-button>
             <el-button
-              v-if="row.status === 'PAUSED'"
+              v-if="row.status === 'PAUSED' && userStore.hasPermission('agv:control')"
               type="success"
               link
               @click="handleResume(row)"
@@ -184,7 +184,7 @@
               恢复
             </el-button>
             <el-button
-              v-if="row.status === 'IDLE'"
+              v-if="row.status === 'IDLE' && userStore.hasPermission('agv:control')"
               type="primary"
               link
               @click="handleCharge(row)"
@@ -195,6 +195,7 @@
               type="danger"
               link
               @click="handleStop(row)"
+              v-if="userStore.hasPermission('agv:control')"
             >
               急停
             </el-button>
@@ -250,27 +251,27 @@
 
       <div class="detail-actions" style="margin-top: 20px">
         <el-button
-          v-if="currentAgv?.status === 'WORKING'"
+          v-if="currentAgv?.status === 'WORKING' && userStore.hasPermission('agv:control')"
           type="warning"
           @click="handlePause(currentAgv)"
         >
           暂停
         </el-button>
         <el-button
-          v-if="currentAgv?.status === 'PAUSED'"
+          v-if="currentAgv?.status === 'PAUSED' && userStore.hasPermission('agv:control')"
           type="success"
           @click="handleResume(currentAgv)"
         >
           恢复
         </el-button>
         <el-button
-          v-if="currentAgv?.status === 'IDLE'"
+          v-if="currentAgv?.status === 'IDLE' && userStore.hasPermission('agv:control')"
           type="primary"
           @click="handleCharge(currentAgv)"
         >
           呼叫充电
         </el-button>
-        <el-button type="danger" @click="handleStop(currentAgv)">紧急停车</el-button>
+        <el-button type="danger" @click="handleStop(currentAgv)" v-if="userStore.hasPermission('agv:control')">紧急停车</el-button>
       </div>
     </el-dialog>
 
@@ -305,6 +306,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { agvApi, websocketService } from '@/api'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
 
 const loading = ref(false)
 const agvList = ref([])

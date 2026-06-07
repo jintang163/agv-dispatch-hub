@@ -66,7 +66,11 @@ export const taskApi = {
   getQueueSize: () => request.get('/tasks/queue/size'),
   refreshQueue: () => request.post('/tasks/queue/refresh'),
   getLogs: (id) => request.get(`/tasks/${id}/logs`),
-  getStatistics: () => request.get('/tasks/statistics')
+  getStatistics: () => request.get('/tasks/statistics'),
+  pauseTask: (taskId, reason) => request.post(`/tasks/${taskId}/pause`, null, { params: { reason } }),
+  resumeTask: (taskId) => request.post(`/tasks/${taskId}/resume`),
+  cancelTask: (taskId, reason) => request.post(`/tasks/${taskId}/cancel`, null, { params: { reason } }),
+  assignTask: (taskId, agvId, path) => request.post(`/tasks/${taskId}/assign`, null, { params: { agvId, path } })
 }
 
 export const agvApi = {
@@ -78,7 +82,11 @@ export const agvApi = {
   resume: (id) => request.post(`/agvs/${id}/resume`),
   stop: (id) => request.post(`/agvs/${id}/stop`),
   charge: (id, station) => request.post(`/agvs/${id}/charge`, null, { params: { chargingStation: station } }),
-  getStatistics: () => request.get('/agvs/statistics')
+  getStatistics: () => request.get('/agvs/statistics'),
+  pauseAgv: (agvId) => request.post(`/agvs/${agvId}/pause`),
+  resumeAgv: (agvId) => request.post(`/agvs/${agvId}/resume`),
+  emergencyStop: (agvId) => request.post(`/agvs/${agvId}/emergency-stop`),
+  callCharge: (agvId) => request.post(`/agvs/${agvId}/call-charge`)
 }
 
 export const dispatchApi = {
@@ -132,14 +140,14 @@ export const dispatchApi = {
    * @param {string} operator 操作人
    * @returns 重规划结果
    */
-  dynamicReplanTask: (taskId, blockedNode, reason, operator) => request.post(`/dispatch/tasks/${taskId}/dynamic-replan`, null, { params: { blockedNode, reason, operator } }),
+  dynamicReplanTask: (taskId, blockedNode, reason) => request.post(`/dispatch/tasks/${taskId}/dynamic-replan`, null, { params: { blockedNode, reason } }),
   /**
    * 从当前位置重新规划任务路径
    * @param {number} taskId 任务ID
    * @param {string} operator 操作人
    * @returns 重规划结果
    */
-  replanTaskFromCurrent: (taskId, operator) => request.post(`/dispatch/tasks/${taskId}/replan`, null, { params: { operator } }),
+  replanTaskFromCurrent: (taskId) => request.post(`/dispatch/tasks/${taskId}/replan`),
   /**
    * 处理路径阻塞事件
    * @param {string} agvId AGV编号
@@ -184,14 +192,14 @@ export const dispatchApi = {
    * @param {string} reason 暂停原因
    * @returns 暂停结果
    */
-  pauseTask: (taskId, operator, reason) => request.post(`/dispatch/tasks/${taskId}/pause`, null, { params: { operator, reason } }),
+  pauseTask: (taskId, reason) => request.post(`/dispatch/tasks/${taskId}/pause`, null, { params: { reason } }),
   /**
    * 恢复已暂停的任务
    * @param {number} taskId 任务ID
    * @param {string} operator 操作人
    * @returns 恢复结果
    */
-  resumeTask: (taskId, operator) => request.post(`/dispatch/tasks/${taskId}/resume`, null, { params: { operator } }),
+  resumeTask: (taskId) => request.post(`/dispatch/tasks/${taskId}/resume`),
   /**
    * 取消任务
    * @param {number} taskId 任务ID
@@ -199,7 +207,7 @@ export const dispatchApi = {
    * @param {string} reason 取消原因
    * @returns 取消结果
    */
-  cancelTask: (taskId, operator, reason) => request.post(`/dispatch/tasks/${taskId}/cancel`, null, { params: { operator, reason } }),
+  cancelTask: (taskId, reason) => request.post(`/dispatch/tasks/${taskId}/cancel`, null, { params: { reason } }),
   /**
    * 获取所有正在执行的任务
    * @returns 执行中任务列表
@@ -240,7 +248,7 @@ export const dispatchApi = {
    * @param {string} handler 处理人
    * @returns 处理结果
    */
-  handleAlarm: (alarmId, handleResult, handler) => request.post(`/dispatch/alarms/${alarmId}/handle`, null, { params: { handleResult, handler } })
+  handleAlarm: (alarmId, handleResult) => request.post(`/dispatch/alarms/${alarmId}/handle`, null, { params: { handleResult } })
 }
 
 export const pathPlanningApi = {

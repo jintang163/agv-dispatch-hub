@@ -1387,19 +1387,9 @@ const handlePauseTask = async (row) => {
         return true
       }
     })
-    const { value: operator } = await ElMessageBox.prompt('请输入操作人', '操作人', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      inputValidator: (value) => {
-        if (!value || value.trim() === '') {
-          return '请输入操作人'
-        }
-        return true
-      }
-    })
     operatingTaskId.value = row.id
     operatingAction.value = 'pause'
-    await dispatchApi.pauseTask(row.id, operator, reason)
+    await dispatchApi.pauseTask(row.id, reason)
     ElMessage.success('任务已暂停')
     loadExecutingTasks()
   } catch (error) {
@@ -1414,19 +1404,14 @@ const handlePauseTask = async (row) => {
 
 const handleResumeTask = async (row) => {
   try {
-    const { value: operator } = await ElMessageBox.prompt('请输入操作人', '恢复任务', {
+    await ElMessageBox.confirm('确定要恢复此任务吗？', '恢复任务', {
       confirmButtonText: '确定',
       cancelButtonText: '取消',
-      inputValidator: (value) => {
-        if (!value || value.trim() === '') {
-          return '请输入操作人'
-        }
-        return true
-      }
+      type: 'warning'
     })
     operatingTaskId.value = row.id
     operatingAction.value = 'resume'
-    await dispatchApi.resumeTask(row.id, operator)
+    await dispatchApi.resumeTask(row.id)
     ElMessage.success('任务已恢复')
     loadExecutingTasks()
   } catch (error) {
@@ -1451,19 +1436,9 @@ const handleCancelTask = async (row) => {
         return true
       }
     })
-    const { value: operator } = await ElMessageBox.prompt('请输入操作人', '操作人', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      inputValidator: (value) => {
-        if (!value || value.trim() === '') {
-          return '请输入操作人'
-        }
-        return true
-      }
-    })
     operatingTaskId.value = row.id
     operatingAction.value = 'cancel'
-    await dispatchApi.cancelTask(row.id, operator, reason)
+    await dispatchApi.cancelTask(row.id, reason)
     ElMessage.success('任务已取消')
     loadExecutingTasks()
   } catch (error) {
@@ -1595,18 +1570,8 @@ const handleHandleAlarm = async (row) => {
         return true
       }
     })
-    const { value: handler } = await ElMessageBox.prompt('请输入处理人', '处理人', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      inputValidator: (value) => {
-        if (!value || value.trim() === '') {
-          return '请输入处理人'
-        }
-        return true
-      }
-    })
     handlingAlarmId.value = row.id
-    await dispatchApi.handleAlarm(row.id, handleResult, handler)
+    await dispatchApi.handleAlarm(row.id, handleResult)
     ElMessage.success('告警已处理')
     loadAllAlarms()
   } catch (error) {

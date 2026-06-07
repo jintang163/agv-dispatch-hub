@@ -33,7 +33,17 @@ public enum RoleEnum {
             return true;
         }
         if (this == DISPATCHER) {
-            return !"user:manage".equals(permission);
+            return !"user:manage".equals(permission) &&
+                   !"user:create".equals(permission) &&
+                   !"user:update".equals(permission) &&
+                   !"user:delete".equals(permission);
+        }
+        if (this == READ_ONLY) {
+            return permission.endsWith(":view") ||
+                   "task:view".equals(permission) ||
+                   "agv:view".equals(permission) ||
+                   "map:view".equals(permission) ||
+                   "log:view".equals(permission);
         }
         return false;
     }
