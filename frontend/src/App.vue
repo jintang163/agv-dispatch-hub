@@ -7,7 +7,7 @@
       </div>
       <div class="header-right">
         <el-tag :type="connectionType" class="connection-status">
-          <el-icon><SignalFilled /></el-icon>
+          <el-icon><Connection /></el-icon>
           {{ connectionText }}
         </el-tag>
         <el-dropdown>
@@ -53,6 +53,10 @@
             <el-icon><Setting /></el-icon>
             <span>调度控制</span>
           </el-menu-item>
+          <el-menu-item index="/monitor-screen">
+            <el-icon><Monitor /></el-icon>
+            <span>监控大屏</span>
+          </el-menu-item>
         </el-menu>
       </el-aside>
       <el-main class="app-main">
@@ -69,6 +73,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { Monitor } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const activeMenu = computed(() => route.path)

@@ -221,7 +221,7 @@ const getWaitTime = (createTime) => {
   const created = new Date(createTime)
   const diff = now - created
   const hours = Math.floor(diff / (1000 * 60 * 60))
-  const minutes = Math.floor((diff % (1000 * 60 * 60) / (1000 * 60))
+  const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
   if (hours > 0) {
     return `${hours}小时${minutes}分钟`
   }

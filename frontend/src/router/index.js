@@ -40,6 +40,12 @@ const routes = [
     name: 'PathPlanning',
     component: () => import('@/views/PathPlanning.vue'),
     meta: { title: '路径规划与冲突解决' }
+  },
+  {
+    path: '/monitor-screen',
+    name: 'MonitorScreen',
+    component: () => import('@/views/MonitorScreen.vue'),
+    meta: { title: '监控大屏' }
   }
 ]
 
