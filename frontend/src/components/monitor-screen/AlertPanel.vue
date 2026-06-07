@@ -23,21 +23,33 @@
 
     <div class="alert-tabs">
       <div
-        v-for="tab in tabs"
-        :key="tab.key"
-        :class="['tab-item', { active: activeTab === tab.key }]"
-        @click="activeTab = tab.key"
+        :class="['tab-item', { active: activeTab === 'unhandled' }]"
+        @click="activeTab = 'unhandled'"
       >
-        {{ tab.label }}
-        <span v-if="tab.count > 0" class="tab-count">{{ tab.count }}</span>
+        未处理
+        <span class="tab-badge" v-if="unhandledCount > 0">{{ unhandledCount }}</span>
       </div>
+      <div
+        :class="['tab-item', { active: activeTab === 'all' }]"
+        @click="activeTab = 'all'"
+      >
+        全部
+      </div>
+      <el-button
+        v-if="unhandledCount > 0"
+        size="small"
+        type="danger"
+        @click="handleResolveAll"
+      >
+        全部处理
+      </el-button>
     </div>
 
     <div class="alert-list" ref="alertListRef">
       <div
         v-for="alert in filteredAlerts"
         :key="alert.id"
-        :class="['alert-item', alert.level, { handled: alert.handled }]"
+        :class="['alert-item', alert.level, { handled: alert.handled, 'unhandled': !alert.handled }]"
       >
         <div class="alert-icon">
           <el-icon v-if="alert.level === 'critical'"><Close /></el-icon>
@@ -48,425 +60,580 @@
         <div class="alert-content">
           <div class="alert-header">
             <span class="alert-title">{{ alert.title }}</span>
-            <span :class="['alert-type', alert.type]">
+            <span :class="['alert-type', getTypeClass(alert.type)]">
               {{ getTypeLabel(alert.type) }}
             </span>
+            <span v-if="!alert.handled" class="unhandled-tag">未处理</span>
+            <span v-else class="handled-tag">已处理</span>
           </div>
-          <div class="alert-message">{{ alert.message }}</div>
+          <p class="alert-message">{{ alert.message }}</p>
           <div class="alert-meta">
-            <span v-if="alert.agvNos.length > 0" class="meta-item">
-              <el-icon><Van /></el-icon>
-              {{ alert.agvNos.join(', ') }}
-            </span>
             <span class="meta-item">
+              <el-icon><Van /></el-icon>
+              {{ alert.agvIds?.join(', ') || '系统' }}
+            </span>
+            <span class="meta-item" v-if="alert.location">
               <el-icon><Position /></el-icon>
               {{ alert.location }}
             </span>
             <span class="meta-item">
               <el-icon><Clock /></el-icon>
-              {{ alert.timestamp }}
+              {{ formatDateTime(alert.createTime) }}
+            </span>
+            <span class="meta-item" v-if="alert.handler">
+              <el-icon><CircleCheck /></el-icon>
+              {{ alert.handler }}
             </span>
           </div>
         </div>
 
         <div class="alert-actions">
-          <el-tag
-            v-if="alert.handled"
-            type="success"
-            size="small"
-            effect="light"
-          >
-            已处理
-          </el-tag>
           <el-button
-            v-else
+            v-if="!alert.handled"
             type="primary"
             size="small"
-            :icon="Check"
-            @click="handleAlert(alert)"
+            @click="openHandleDialog(alert)"
           >
             处理
+          </el-button>
+          <el-button
+            v-else
+            type="success"
+            size="small"
+            @click="showHandleResult(alert)"
+          >
+            查看
           </el-button>
         </div>
       </div>
 
-      <div v-if="filteredAlerts.length === 0" class="empty-alerts">
-        <el-icon><CircleCheck /></el-icon>
-        <span>暂无{{ activeTab === 'unhandled' ? '未处理' : '' }}告警</span>
-      </div>
+      <el-empty
+        v-if="filteredAlerts.length === 0"
+        :description="activeTab === 'unhandled' ? '暂无未处理告警' : '暂无告警记录'"
+      />
     </div>
+
+    <el-dialog
+      v-model="handleDialogVisible"
+      title="处理告警"
+      width="500px"
+    >
+      <el-form :model="handleForm" label-width="80px">
+        <el-form-item label="告警标题">
+          <span>{{ currentAlert?.title }}</span>
+        </el-form-item>
+        <el-form-item label="告警信息">
+          <span>{{ currentAlert?.message }}</span>
+        </el-form-item>
+        <el-form-item label="处理结果" prop="handleResult">
+          <el-radio-group v-model="handleForm.handleResult">
+            <el-radio label="resolved">已解决</el-radio>
+            <el-radio label="ignored">忽略</el-radio>
+            <el-radio label="escalated">已升级</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="处理说明" prop="remark">
+          <el-input
+            v-model="handleForm.remark"
+            type="textarea"
+            :rows="3"
+            placeholder="请输入处理说明"
+          />
+        </el-form-item>
+        <el-form-item label="处理人" prop="handler">
+          <el-input v-model="handleForm.handler" placeholder="请输入处理人姓名" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="handleDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmHandle">确认处理</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="resultDialogVisible"
+      title="告警处理结果"
+      width="500px"
+    >
+      <el-descriptions :column="1" border>
+        <el-descriptions-item label="告警标题">{{ currentAlert?.title }}</el-descriptions-item>
+        <el-descriptions-item label="告警信息">{{ currentAlert?.message }}</el-descriptions-item>
+        <el-descriptions-item label="处理结果">
+          <span :class="['result-tag', currentAlert?.handleResult]">
+            {{ getHandleResultLabel(currentAlert?.handleResult) }}
+          </span>
+        </el-descriptions-item>
+        <el-descriptions-item label="处理人">{{ currentAlert?.handler }}</el-descriptions-item>
+        <el-descriptions-item label="处理时间">{{ formatDateTime(currentAlert?.handleTime) }}</el-descriptions-item>
+      </el-descriptions>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Warning, Close, InfoFilled,
-  Van, Position, Clock, CircleCheck, Check
+  Van, Position, Clock, CircleCheck
 } from '@element-plus/icons-vue'
+import { dispatchApi } from '@/api'
+import {
+  formatDateTime,
+  getAlarmTypeLabel,
+  getAlarmLevelColor,
+  normalizeAlarmData
+} from '@/utils/helpers'
 
 const props = defineProps({
-  alerts: {
+  alarms: {
     type: Array,
     default: () => []
+  },
+  autoRefresh: {
+    type: Boolean,
+    default: true
   }
 })
 
-const emit = defineEmits(['handleAlert'])
+const emit = defineEmits(['alarmHandled', 'update:alarms'])
 
 const activeTab = ref('unhandled')
+const handleDialogVisible = ref(false)
+const resultDialogVisible = ref(false)
+const currentAlert = ref(null)
 const alertListRef = ref(null)
 
-const criticalCount = computed(() => props.alerts.filter(a => a.level === 'critical' && !a.handled).length)
-const errorCount = computed(() => props.alerts.filter(a => a.level === 'error' && !a.handled).length)
-const warningCount = computed(() => props.alerts.filter(a => a.level === 'warning' && !a.handled).length)
-
-const tabs = computed(() => [
-  { key: 'unhandled', label: '未处理', count: props.alerts.filter(a => !a.handled).length },
-  { key: 'all', label: '全部', count: props.alerts.length }
-])
+const handleForm = ref({
+  handleResult: 'resolved',
+  remark: '',
+  handler: ''
+})
 
 const filteredAlerts = computed(() => {
-  let list = [...props.alerts]
+  let list = props.alarms || []
   if (activeTab.value === 'unhandled') {
     list = list.filter(a => !a.handled)
   }
-  return list.sort((a, b) => {
-    const levelOrder = { critical: 0, error: 1, warning: 2 }
-    if (a.handled !== b.handled) return a.handled ? 1 : -1
-    return levelOrder[a.level] - levelOrder[b.level]
-  })
+  return list.slice(0, 10)
 })
 
-const getTypeLabel = (type) => ({
-  deadlock: '死锁',
-  lowBattery: '低电量',
-  pathBlocked: '路径阻塞',
-  conflict: '路径冲突',
-  obstacle: '障碍物',
-  system: '系统异常'
-}[type] || type)
+const criticalCount = computed(() => props.alarms.filter(a => a.level === 'critical' && !a.handled).length)
+const errorCount = computed(() => props.alarms.filter(a => a.level === 'error' && !a.handled).length)
+const warningCount = computed(() => props.alarms.filter(a => a.level === 'warning' && !a.handled).length)
+const unhandledCount = computed(() => props.alarms.filter(a => !a.handled).length)
 
-const handleAlert = (alert) => {
-  emit('handleAlert', alert)
+const getTypeLabel = (type) => getAlarmTypeLabel(type)
+
+const getTypeClass = (type) => type?.toLowerCase() || ''
+
+const getHandleResultLabel = (result) => ({
+  resolved: '已解决',
+  ignored: '忽略',
+  escalated: '已升级'
+}[result] || result)
+
+const openHandleDialog = (alert) => {
+  currentAlert.value = alert
+  handleForm.value = {
+    handleResult: 'resolved',
+    remark: '',
+    handler: 'admin'
+  }
+  handleDialogVisible.value = true
 }
 
-watch(
-  () => props.alerts,
-  () => {
-    nextTick(() => {
-      if (alertListRef.value) {
-        alertListRef.value.scrollTop = 0
+const showHandleResult = (alert) => {
+  currentAlert.value = alert
+  resultDialogVisible.value = true
+}
+
+const confirmHandle = async () => {
+  if (!handleForm.value.handler) {
+    ElMessage.warning('请输入处理人姓名')
+    return
+  }
+  try {
+    await dispatchApi.handleAlarm(
+      currentAlert.value.id,
+      `${handleForm.value.handleResult}: ${handleForm.value.remark}`,
+      handleForm.value.handler
+    )
+    if (currentAlert.value) {
+      currentAlert.value.handled = true
+      currentAlert.value.handleTime = new Date().toISOString()
+      currentAlert.value.handleResult = handleForm.value.handleResult
+      currentAlert.value.handler = handleForm.value.handler
+    }
+    ElMessage.success('告警处理成功')
+    handleDialogVisible.value = false
+    emit('alarmHandled', currentAlert.value)
+  } catch (e) {
+    ElMessage.error(e.message || '告警处理失败')
+  }
+}
+
+const handleResolveAll = async () => {
+  try {
+    await ElMessageBox.confirm(
+      `确定要处理所有 ${unhandledCount.value} 条未处理告警吗？`,
+      '批量处理确认',
+      { type: 'warning' }
+    )
+    await dispatchApi.resolveAllConflicts()
+    props.alarms.forEach(a => {
+      if (!a.handled) {
+        a.handled = true
+        a.handleTime = new Date().toISOString()
+        a.handleResult = 'batch_resolved'
+        a.handler = 'system'
       }
     })
-  },
-  { deep: true }
-)
+    ElMessage.success('批量处理成功')
+    emit('alarmHandled', { batch: true })
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error(e.message || '批量处理失败')
+    }
+  }
+}
+
+watch(() => props.alarms, () => {
+  if (alertListRef.value) {
+    alertListRef.value.scrollTop = 0
+  }
+}, { deep: true })
 </script>
 
 <style lang="scss" scoped>
 .alert-panel {
-  height: 100%;
   display: flex;
   flex-direction: column;
+  height: 100%;
+  background: rgba(15, 23, 42, 0.8);
+  border-radius: 8px;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  overflow: hidden;
 
   .panel-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 16px;
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.9) 100%);
+    border-bottom: 1px solid rgba(59, 130, 246, 0.2);
 
     h3 {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 600;
-      color: #e0e7ff;
       display: flex;
       align-items: center;
       gap: 8px;
+      margin: 0 0 12px 0;
+      font-size: 16px;
+      color: #f1f5f9;
 
-      :deep(.el-icon) {
+      .el-icon {
         color: #f59e0b;
+        font-size: 20px;
       }
     }
+  }
 
-    .alert-stats {
+  .alert-stats {
+    display: flex;
+    gap: 12px;
+
+    .stat-badge {
       display: flex;
-      gap: 10px;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 500;
 
-      .stat-badge {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        padding: 4px 10px;
-        border-radius: 20px;
-        font-size: 11px;
-        font-weight: 600;
+      &.critical {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+      }
 
-        &.critical {
-          background: rgba(239, 68, 68, 0.2);
-          color: #f87171;
-        }
+      &.error {
+        background: rgba(245, 158, 11, 0.2);
+        color: #f59e0b;
+      }
 
-        &.error {
-          background: rgba(249, 115, 22, 0.2);
-          color: #fb923c;
-        }
+      &.warning {
+        background: rgba(59, 130, 246, 0.2);
+        color: #3b82f6;
+      }
 
-        &.warning {
-          background: rgba(245, 158, 11, 0.2);
-          color: #fbbf24;
-        }
+      .el-icon {
+        font-size: 14px;
       }
     }
   }
 
   .alert-tabs {
     display: flex;
-    padding: 10px 16px 0;
-    gap: 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    align-items: center;
+    padding: 12px 16px;
+    gap: 16px;
+    background: rgba(15, 23, 42, 0.6);
+    border-bottom: 1px solid rgba(59, 130, 246, 0.1);
 
     .tab-item {
       position: relative;
-      padding: 8px 16px;
-      font-size: 13px;
-      color: #9ca3af;
+      padding: 6px 12px;
       cursor: pointer;
-      transition: all 0.2s ease;
-      border-radius: 8px 8px 0 0;
+      color: #94a3b8;
+      font-size: 14px;
+      transition: all 0.3s ease;
+      border-radius: 4px;
 
       &:hover {
-        color: #e0e7ff;
-        background: rgba(255, 255, 255, 0.05);
+        color: #3b82f6;
+        background: rgba(59, 130, 246, 0.1);
       }
 
       &.active {
-        color: #60a5fa;
-        background: rgba(59, 130, 246, 0.1);
+        color: #3b82f6;
+        background: rgba(59, 130, 246, 0.15);
 
-        &::after {
-          content: '';
-          position: absolute;
-          bottom: -1px;
-          left: 0;
-          right: 0;
-          height: 2px;
+        .tab-badge {
           background: #3b82f6;
-          border-radius: 2px 2px 0 0;
+          color: #fff;
         }
       }
+    }
 
-      .tab-count {
-        display: inline-block;
-        margin-left: 6px;
-        padding: 1px 6px;
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 10px;
-        font-size: 10px;
-        font-weight: 600;
-      }
+    .tab-badge {
+      display: inline-block;
+      min-width: 18px;
+      height: 18px;
+      line-height: 18px;
+      text-align: center;
+      padding: 0 5px;
+      margin-left: 4px;
+      border-radius: 9px;
+      background: #ef4444;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
     }
   }
 
   .alert-list {
     flex: 1;
     overflow-y: auto;
-    padding: 12px;
-    min-height: 0;
+    padding: 8px;
 
     &::-webkit-scrollbar {
       width: 6px;
     }
 
+    &::-webkit-scrollbar-track {
+      background: rgba(15, 23, 42, 0.3);
+    }
+
     &::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.2);
+      background: rgba(59, 130, 246, 0.3);
       border-radius: 3px;
     }
+  }
 
-    .alert-item {
-      display: flex;
-      gap: 12px;
-      padding: 14px;
-      margin-bottom: 10px;
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 10px;
-      transition: all 0.3s ease;
-      animation: slideIn 0.3s ease;
+  .alert-item {
+    display: flex;
+    padding: 12px;
+    margin-bottom: 8px;
+    background: rgba(30, 41, 59, 0.8);
+    border-radius: 6px;
+    border-left: 3px solid transparent;
+    transition: all 0.3s ease;
 
-      &:hover {
-        background: rgba(255, 255, 255, 0.08);
-        transform: translateX(4px);
-      }
+    &:hover {
+      background: rgba(30, 41, 59, 0.95);
+      transform: translateX(2px);
+    }
 
-      &.critical {
-        border-left: 4px solid #ef4444;
-        background: linear-gradient(90deg, rgba(239, 68, 68, 0.1) 0%, rgba(255, 255, 255, 0.05) 100%);
+    &.critical {
+      border-left-color: #ef4444;
 
-        .alert-icon {
-          color: #ef4444;
-          background: rgba(239, 68, 68, 0.2);
-        }
-      }
-
-      &.error {
-        border-left: 4px solid #f97316;
-        background: linear-gradient(90deg, rgba(249, 115, 22, 0.1) 0%, rgba(255, 255, 255, 0.05) 100%);
-
-        .alert-icon {
-          color: #f97316;
-          background: rgba(249, 115, 22, 0.2);
-        }
-      }
-
-      &.warning {
-        border-left: 4px solid #f59e0b;
-        background: linear-gradient(90deg, rgba(245, 158, 11, 0.1) 0%, rgba(255, 255, 255, 0.05) 100%);
-
-        .alert-icon {
-          color: #f59e0b;
-          background: rgba(245, 158, 11, 0.2);
-        }
-      }
-
-      &.handled {
-        opacity: 0.6;
-
-        &:hover {
-          opacity: 0.8;
-        }
-      }
-
-      .alert-icon {
-        flex-shrink: 0;
-        width: 36px;
-        height: 36px;
-        border-radius: 8px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-
-        :deep(.el-icon) {
-          font-size: 18px;
-        }
-      }
-
-      .alert-content {
-        flex: 1;
-        min-width: 0;
-
-        .alert-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 6px;
-
-          .alert-title {
-            font-size: 14px;
-            font-weight: 600;
-            color: #e0e7ff;
-          }
-
-          .alert-type {
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 10px;
-            font-weight: 600;
-
-            &.deadlock {
-              background: rgba(239, 68, 68, 0.2);
-              color: #f87171;
-            }
-
-            &.lowBattery {
-              background: rgba(245, 158, 11, 0.2);
-              color: #fbbf24;
-            }
-
-            &.pathBlocked {
-              background: rgba(249, 115, 22, 0.2);
-              color: #fb923c;
-            }
-
-            &.conflict {
-              background: rgba(139, 92, 246, 0.2);
-              color: #a78bfa;
-            }
-
-            &.obstacle {
-              background: rgba(236, 72, 153, 0.2);
-              color: #f472b6;
-            }
-
-            &.system {
-              background: rgba(107, 114, 128, 0.2);
-              color: #9ca3af;
-            }
-          }
-        }
-
-        .alert-message {
-          font-size: 12px;
-          color: #d1d5db;
-          margin-bottom: 8px;
-          line-height: 1.5;
-        }
-
-        .alert-meta {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 12px;
-
-          .meta-item {
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 11px;
-            color: #9ca3af;
-
-            :deep(.el-icon) {
-              font-size: 11px;
-            }
-          }
-        }
-      }
-
-      .alert-actions {
-        flex-shrink: 0;
-        display: flex;
-        align-items: center;
+      &.unhandled {
+        animation: criticalBlink 2s infinite;
       }
     }
 
-    .empty-alerts {
+    &.error {
+      border-left-color: #f59e0b;
+    }
+
+    &.warning {
+      border-left-color: #3b82f6;
+    }
+
+    &.handled {
+      opacity: 0.6;
+    }
+  }
+
+  @keyframes criticalBlink {
+    0%, 100% { background: rgba(239, 68, 68, 0.1); }
+    50% { background: rgba(239, 68, 68, 0.3); }
+  }
+
+  .alert-icon {
+    flex-shrink: 0;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    margin-right: 12px;
+
+    .critical & {
+      background: rgba(239, 68, 68, 0.2);
+      color: #ef4444;
+    }
+
+    .error & {
+      background: rgba(245, 158, 11, 0.2);
+      color: #f59e0b;
+    }
+
+    .warning & {
+      background: rgba(59, 130, 246, 0.2);
+      color: #3b82f6;
+    }
+
+    .el-icon {
+      font-size: 18px;
+    }
+  }
+
+  .alert-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .alert-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+
+    .alert-title {
+      font-weight: 500;
+      color: #f1f5f9;
+      font-size: 14px;
+    }
+
+    .alert-type {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: rgba(100, 116, 139, 0.3);
+      color: #94a3b8;
+
+      &.deadlock {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+      }
+
+      &.lowbattery {
+        background: rgba(245, 158, 11, 0.2);
+        color: #f59e0b;
+      }
+
+      &.pathblocked {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+      }
+
+      &.conflict {
+        background: rgba(245, 158, 11, 0.2);
+        color: #f59e0b;
+      }
+    }
+
+    .unhandled-tag {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: #ef4444;
+      color: #fff;
+      animation: pulse 1.5s infinite;
+    }
+
+    .handled-tag {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: #10b981;
+      color: #fff;
+    }
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  .alert-message {
+    margin: 4px 0;
+    color: #94a3b8;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .alert-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 6px;
+
+    .meta-item {
       display: flex;
-      flex-direction: column;
       align-items: center;
-      justify-content: center;
-      padding: 60px 20px;
-      color: #6b7280;
-      font-size: 13px;
-      gap: 12px;
+      gap: 4px;
+      font-size: 12px;
+      color: #64748b;
 
-      :deep(.el-icon) {
-        font-size: 48px;
-        opacity: 0.4;
-        color: #10b981;
+      .el-icon {
+        font-size: 12px;
       }
     }
   }
-}
 
-@keyframes slideIn {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
+  .alert-actions {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    margin-left: 12px;
   }
-  to {
-    opacity: 1;
-    transform: translateY(0);
+
+  .result-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+
+    &.resolved {
+      background: rgba(16, 185, 129, 0.2);
+      color: #10b981;
+    }
+
+    &.ignored {
+      background: rgba(100, 116, 139, 0.2);
+      color: #64748b;
+    }
+
+    &.escalated {
+      background: rgba(245, 158, 11, 0.2);
+      color: #f59e0b;
+    }
+
+    &.batch_resolved {
+      background: rgba(59, 130, 246, 0.2);
+      color: #3b82f6;
+    }
   }
 }
 </style>

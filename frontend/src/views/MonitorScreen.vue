@@ -27,34 +27,39 @@
     <div class="screen-body">
       <div class="left-panel">
         <div class="panel-wrapper agv-panel">
-          <AgvStatusCards :agv-list="agvList" />
+          <AgvStatusCards :agv-list="agvList" @agv-updated="handleAgvUpdated" />
         </div>
         <div class="panel-wrapper alert-panel">
-          <AlertPanel :alerts="alerts" @handle-alert="handleAlert" />
+          <AlertPanel :alerts="alarms" @alarm-handled="handleAlertHandled" />
         </div>
       </div>
 
       <div class="center-panel">
         <div class="panel-wrapper map-panel">
           <MapVisualization
-            :map-nodes="mapNodes"
-            :map-paths="mapPaths"
+            :map-nodes="MAP_NODES"
+            :map-paths="MAP_PATHS"
             :agv-list="agvList"
             :executing-tasks="executingTasks"
+            :get-agv-animated-position="getAgvAnimatedPosition"
           />
         </div>
         <div class="panel-wrapper queue-panel">
           <TaskQueueBoard
             :pending-tasks="pendingTasks"
             :executing-tasks="executingTasks"
-            @update-priority="handleUpdatePriority"
+            @priority-updated="handlePriorityUpdated"
+            @task-updated="handleTaskUpdated"
           />
         </div>
       </div>
 
       <div class="right-panel">
         <div class="panel-wrapper history-panel">
-          <HistoryStatistics :history-stats="historyStats" />
+          <HistoryStatistics
+            :history-stats="historyStats"
+            :completed-tasks="completedTasks"
+          />
         </div>
       </div>
     </div>
@@ -72,32 +77,29 @@ import TaskQueueBoard from '@/components/monitor-screen/TaskQueueBoard.vue'
 import AgvStatusCards from '@/components/monitor-screen/AgvStatusCards.vue'
 import AlertPanel from '@/components/monitor-screen/AlertPanel.vue'
 import HistoryStatistics from '@/components/monitor-screen/HistoryStatistics.vue'
-import {
-  mapNodes,
-  mapPaths,
-  mockAgvList,
-  mockPendingTasks,
-  mockExecutingTasks,
-  mockAlerts,
-  mockHistoryStats,
-  generateMockAgvPositions
-} from '@/mock/monitorData'
+import { useMonitor } from '@/composables/useMonitor'
+import { MAP_NODES, MAP_PATHS } from '@/utils/constants'
+
+const {
+  agvList,
+  pendingTasks,
+  executingTasks,
+  alarms,
+  historyStats,
+  completedTasks,
+  getAgvAnimatedPosition,
+  loadAllData,
+  startRealTimeUpdates,
+  stopRealTimeUpdates
+} = useMonitor()
 
 const currentTime = ref('')
 const isConnected = ref(true)
 const isFullscreen = ref(false)
 
-const agvList = ref([...mockAgvList])
-const pendingTasks = ref([...mockPendingTasks])
-const executingTasks = ref([...mockExecutingTasks])
-const alerts = ref([...mockAlerts])
-const historyStats = ref({ ...mockHistoryStats })
-
 let timeTimer = null
-let dataTimer = null
-let progressTimer = null
 
-const unhandledAlertCount = computed(() => alerts.value.filter(a => !a.handled).length)
+const unhandledAlertCount = computed(() => alarms.value.filter(a => !a.handled).length)
 
 const updateTime = () => {
   const now = new Date()
@@ -112,101 +114,20 @@ const updateTime = () => {
   })
 }
 
-const updateAgvPositions = () => {
-  agvList.value = generateMockAgvPositions([...agvList.value])
+const handleAlertHandled = () => {
+  loadAllData()
 }
 
-const updateTaskProgress = () => {
-  executingTasks.value = executingTasks.value.map(task => {
-    if (task.progress < 100) {
-      const increment = Math.floor(Math.random() * 3) + 1
-      const newProgress = Math.min(task.progress + increment, 100)
-      const pathLength = task.currentPath?.length || 0
-      const newNodeIndex = pathLength > 0
-        ? Math.min(Math.floor((newProgress / 100) * (pathLength - 1)), pathLength - 1)
-        : task.currentNodeIndex
-
-      return {
-        ...task,
-        progress: newProgress,
-        elapsedTime: task.elapsedTime + 2,
-        currentNodeIndex: newNodeIndex
-      }
-    }
-    return task
-  })
-
-  const completedTasks = executingTasks.value.filter(t => t.progress >= 100)
-  if (completedTasks.length > 0) {
-    completedTasks.forEach(task => {
-      addCompletedTask(task)
-    })
-    executingTasks.value = executingTasks.value.filter(t => t.progress < 100)
-  }
-
-  if (pendingTasks.value.length > 0 && executingTasks.value.length < 5) {
-    const newTask = pendingTasks.value.shift()
-    if (newTask) {
-      const availableAgv = agvList.value.find(a => a.status === 0)
-      if (availableAgv) {
-        executingTasks.value.push({
-          ...newTask,
-          status: 2,
-          assignedAgv: availableAgv.agvNo,
-          progress: 0,
-          currentPath: [newTask.startPoint, 'C02', newTask.endPoint],
-          currentNodeIndex: 0,
-          startTime: new Date().toLocaleString('zh-CN'),
-          elapsedTime: 0
-        })
-        availableAgv.status = 1
-        availableAgv.currentTask = newTask.taskNo
-      }
-    }
-  }
+const handlePriorityUpdated = () => {
+  loadAllData()
 }
 
-const addCompletedTask = (task) => {
-  const newCompleted = {
-    taskNo: task.taskNo,
-    type: task.taskType,
-    startPoint: task.startPoint,
-    endPoint: task.endPoint,
-    completedTime: new Date().toLocaleString('zh-CN'),
-    duration: task.elapsedTime,
-    mileage: Math.round(Math.random() * 20 + 10)
-  }
-  historyStats.value.recentCompletedTasks = [
-    newCompleted,
-    ...historyStats.value.recentCompletedTasks.slice(0, 4)
-  ]
-  historyStats.value.todayCompleted = (historyStats.value.todayCompleted || 0) + 1
-
-  const agv = agvList.value.find(a => a.currentTask === task.taskNo)
-  if (agv) {
-    agv.status = 0
-    agv.currentTask = null
-    agv.batteryLevel = Math.max(agv.batteryLevel - 5, 10)
-  }
+const handleTaskUpdated = () => {
+  loadAllData()
 }
 
-const handleAlert = (alert) => {
-  const index = alerts.value.findIndex(a => a.id === alert.id)
-  if (index !== -1) {
-    alerts.value[index].handled = true
-    ElMessage.success(`告警 ${alert.id} 已处理`)
-  }
-}
-
-const handleUpdatePriority = ({ taskId, oldIndex, newIndex }) => {
-  const list = [...pendingTasks.value]
-  const [movedItem] = list.splice(oldIndex, 1)
-  list.splice(newIndex, 0, movedItem)
-  list.forEach((task, idx) => {
-    task.priority = list.length - idx
-  })
-  pendingTasks.value = list
-  ElMessage.success(`任务 ${movedItem.taskNo} 优先级已调整`)
+const handleAgvUpdated = () => {
+  loadAllData()
 }
 
 const toggleFullscreen = () => {
@@ -226,20 +147,17 @@ const handleFullscreenChange = () => {
 onMounted(() => {
   updateTime()
   timeTimer = setInterval(updateTime, 1000)
-  dataTimer = setInterval(updateAgvPositions, 2000)
-  progressTimer = setInterval(updateTaskProgress, 2000)
-
   document.addEventListener('fullscreenchange', handleFullscreenChange)
 
-  if (unhandledAlertCount.value > 0) {
-    ElMessage.warning(`当前有 ${unhandledAlertCount.value} 条未处理告警`)
-  }
+  setTimeout(() => {
+    if (unhandledAlertCount.value > 0) {
+      ElMessage.warning(`当前有 ${unhandledAlertCount.value} 条未处理告警`)
+    }
+  }, 2000)
 })
 
 onUnmounted(() => {
   clearInterval(timeTimer)
-  clearInterval(dataTimer)
-  clearInterval(progressTimer)
   document.removeEventListener('fullscreenchange', handleFullscreenChange)
 })
 </script>

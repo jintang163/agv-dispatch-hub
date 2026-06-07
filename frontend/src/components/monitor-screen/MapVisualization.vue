@@ -2,50 +2,33 @@
   <div class="map-visualization">
     <div class="panel-header">
       <h3>
-        <el-icon><Position /></el-icon>
+        <el-icon><Location /></el-icon>
         AGV实时地图
       </h3>
-      <div class="legend">
-        <span class="legend-item">
-          <span class="legend-dot" style="background: #93c5fd;"></span>
-          工作站
-        </span>
-        <span class="legend-item">
-          <span class="legend-dot" style="background: #86efac;"></span>
-          存储区
-        </span>
-        <span class="legend-item">
-          <span class="legend-dot" style="background: #fcd34d;"></span>
-          充电站
-        </span>
-        <span class="legend-item">
-          <span class="legend-dot" style="background: #fca5a5;"></span>
-          装卸区
-        </span>
-        <span class="legend-item">
-          <span class="legend-dot" style="background: #c4b5fd;"></span>
-          路口
+      <div class="map-legend">
+        <span v-for="legend in nodeLegends" :key="legend.type" class="legend-item">
+          <span class="legend-dot" :style="{ background: legend.color }"></span>
+          {{ legend.label }}
         </span>
       </div>
     </div>
-    <div ref="mapChartRef" class="map-chart"></div>
+    <div ref="mapChartRef" class="map-container"></div>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import * as echarts from 'echarts'
-import { Position } from '@element-plus/icons-vue'
+import { Location } from '@element-plus/icons-vue'
+import {
+  getAgvStatusColor,
+  getNodeTypeColor,
+  getNodePosition,
+  interpolatePosition
+} from '@/utils/helpers'
+import { MAP_NODES, MAP_PATHS, NODE_TYPE } from '@/utils/constants'
 
 const props = defineProps({
-  mapNodes: {
-    type: Array,
-    default: () => []
-  },
-  mapPaths: {
-    type: Array,
-    default: () => []
-  },
   agvList: {
     type: Array,
     default: () => []
@@ -53,283 +36,333 @@ const props = defineProps({
   executingTasks: {
     type: Array,
     default: () => []
+  },
+  getAgvAnimatedPosition: {
+    type: Function,
+    default: null
   }
 })
 
 const mapChartRef = ref(null)
-let mapChartInstance = null
+let mapChart = null
+let animationFrame = null
+let lastUpdateTime = 0
 
-const getNodeTypeColor = (type) => {
-  const colors = {
-    workstation: '#93c5fd',
-    storage: '#86efac',
-    charging: '#fcd34d',
-    loading: '#fca5a5',
-    unloading: '#fca5a5',
-    intersection: '#c4b5fd'
-  }
-  return colors[type] || '#93c5fd'
-}
-
-const getAgvStatusColor = (status) => {
-  const colors = { 0: '#10b981', 1: '#3b82f6', 2: '#f59e0b', 3: '#ef4444', 4: '#6b7280', 5: '#8b5cf6' }
-  return colors[status] || '#6b7280'
-}
-
-const getNodePosition = (code) => {
-  const node = props.mapNodes.find(n => n.code === code)
-  return node ? [node.x, node.y] : null
-}
+const nodeLegends = Object.values(NODE_TYPE).map(item => ({
+  type: item.value,
+  label: item.label,
+  color: item.color
+}))
 
 const initChart = () => {
   if (!mapChartRef.value) return
 
-  mapChartInstance = echarts.init(mapChartRef.value)
+  if (mapChart) {
+    mapChart.dispose()
+  }
+
+  mapChart = echarts.init(mapChartRef.value)
   updateChart()
+  startAnimation()
 }
 
 const updateChart = () => {
-  if (!mapChartInstance || props.mapNodes.length === 0) return
+  if (!mapChart) return
 
-  const pathLines = []
-  props.mapPaths.forEach(path => {
-    const start = getNodePosition(path[0])
-    const end = getNodePosition(path[1])
-    if (start && end) {
-      pathLines.push({
-        coords: [start, end],
-        lineStyle: { color: '#d1d5db', width: 2, type: 'solid' }
-      })
-    }
-  })
+  const nodePoints = MAP_NODES.map(node => ({
+    name: node.code,
+    value: [node.x, node.y],
+    itemStyle: { color: getNodeTypeColor(node.type) }
+  }))
 
-  const taskPathLines = []
+  const pathLines = MAP_PATHS.map(path => ({
+    coords: [
+      getNodePosition(path[0], MAP_NODES),
+      getNodePosition(path[1], MAP_NODES)
+    ]
+  }))
+
+  let taskPathLines = []
+  let targetPoints = []
+
   props.executingTasks.forEach(task => {
     if (task.currentPath && task.currentPath.length > 1) {
-      for (let i = task.currentNodeIndex || 0; i < task.currentPath.length - 1; i++) {
-        const start = getNodePosition(task.currentPath[i])
-        const end = getNodePosition(task.currentPath[i + 1])
-        if (start && end) {
-          taskPathLines.push({
-            coords: [start, end],
-            lineStyle: {
-              color: getAgvStatusColor(1),
-              width: 4,
-              type: 'solid',
-              shadowColor: getAgvStatusColor(1),
-              shadowBlur: 10
-            }
-          })
-        }
+      const path = task.currentPath
+      for (let i = 0; i < path.length - 1; i++) {
+        taskPathLines.push({
+          coords: [
+            getNodePosition(path[i], MAP_NODES),
+            getNodePosition(path[i + 1], MAP_NODES)
+          ],
+          lineStyle: {
+            color: '#fbbf24',
+            width: 4
+          }
+        })
       }
-    }
-  })
 
-  const targetPoints = []
-  props.executingTasks.forEach(task => {
-    const endPos = getNodePosition(task.endPoint)
-    if (endPos) {
+      const endPoint = task.currentPath[task.currentPath.length - 1]
       targetPoints.push({
-        name: `目标: ${task.taskNo}`,
-        value: endPos,
-        taskNo: task.taskNo,
+        name: `目标-${task.taskNo}`,
+        value: getNodePosition(endPoint, MAP_NODES),
         itemStyle: { color: '#ef4444' }
       })
     }
   })
 
-  const agvPoints = props.agvList.map(agv => ({
-    name: agv.agvNo,
-    value: [agv.xCoord || 0, agv.yCoord || 0],
-    status: agv.status,
-    battery: agv.batteryLevel,
-    currentTask: agv.currentTask,
-    currentPosition: agv.currentPosition,
-    symbolSize: 22,
-    itemStyle: {
-      color: getAgvStatusColor(agv.status),
-      shadowColor: getAgvStatusColor(agv.status),
-      shadowBlur: 15
+  const agvPoints = props.agvList.map(agv => {
+    let position
+    if (props.getAgvAnimatedPosition) {
+      position = props.getAgvAnimatedPosition(agv.id)
+    } else {
+      position = getNodePosition(agv.currentPosition, MAP_NODES)
     }
-  }))
 
-  const nodePoints = props.mapNodes.map(node => ({
-    name: node.code,
-    value: [node.x, node.y],
-    type: node.type,
-    symbolSize: 28,
-    itemStyle: {
-      color: getNodeTypeColor(node.type),
-      borderColor: '#fff',
-      borderWidth: 2
+    return {
+      name: agv.agvNo,
+      value: position,
+      symbolSize: 28,
+      itemStyle: {
+        color: getAgvStatusColor(agv.status),
+        shadowBlur: 15,
+        shadowColor: getAgvStatusColor(agv.status)
+      },
+      currentPosition: agv.currentPosition,
+      status: agv.status,
+      battery: agv.battery,
+      currentTaskId: agv.currentTaskId
     }
-  }))
+  })
 
-  const option = {
+  mapChart.setOption({
     tooltip: {
       trigger: 'item',
+      backgroundColor: 'rgba(15, 23, 42, 0.95)',
+      borderColor: 'rgba(59, 130, 246, 0.5)',
+      textStyle: { color: '#f1f5f9' },
       formatter: (params) => {
         if (params.seriesName === 'AGV') {
-          const statusLabels = { 0: '空闲', 1: '工作中', 2: '充电中', 3: '故障', 4: '离线', 5: '暂停' }
+          const data = params.data
           return `
-            <div style="padding: 4px;">
-              <div style="font-weight: bold; margin-bottom: 4px;">${params.data.name}</div>
-              <div>状态: ${statusLabels[params.data.status] || '未知'}</div>
-              <div>电量: ${params.data.battery}%</div>
-              <div>位置: ${params.data.currentPosition}</div>
-              <div>任务: ${params.data.currentTask || '无'}</div>
-            </div>
-          `
-        } else if (params.seriesName === '节点') {
-          const typeLabels = { workstation: '工作站', storage: '存储区', charging: '充电站', loading: '装货区', unloading: '卸货区', intersection: '路口' }
-          return `
-            <div style="padding: 4px;">
-              <div style="font-weight: bold;">${params.data.name}</div>
-              <div>类型: ${typeLabels[params.data.type] || '节点'}</div>
-            </div>
-          `
-        } else if (params.seriesName === '目标点') {
-          return `
-            <div style="padding: 4px;">
-              <div style="font-weight: bold; color: #ef4444;">${params.data.name}</div>
-              <div>任务编号: ${params.data.taskNo}</div>
+            <div style="padding: 8px;">
+              <div style="font-weight: 600; font-size: 14px; margin-bottom: 8px;">${data.name}</div>
+              <div style="font-size: 12px; color: #94a3b8;">位置: ${data.currentPosition}</div>
+              <div style="font-size: 12px; color: #94a3b8;">电量: ${data.battery}%</div>
+              <div style="font-size: 12px; color: #94a3b8;">任务: ${data.currentTaskId || '无'}</div>
             </div>
           `
         }
         return params.name
       }
     },
-    grid: { left: '5%', right: '5%', top: '5%', bottom: '5%' },
+    grid: { left: '3%', right: '3%', top: '3%', bottom: '3%' },
     xAxis: {
       type: 'value',
       min: -1,
       max: 16,
-      splitLine: { show: true, lineStyle: { type: 'dashed', color: '#e5e7eb' } },
-      axisLabel: { show: false },
-      axisLine: { show: false }
+      splitLine: { lineStyle: { color: 'rgba(71, 85, 105, 0.2)' } },
+      axisLine: { show: false },
+      axisLabel: { show: false }
     },
     yAxis: {
       type: 'value',
       min: -1,
       max: 16,
       inverse: true,
-      splitLine: { show: true, lineStyle: { type: 'dashed', color: '#e5e7eb' } },
-      axisLabel: { show: false },
-      axisLine: { show: false }
+      splitLine: { lineStyle: { color: 'rgba(71, 85, 105, 0.2)' } },
+      axisLine: { show: false },
+      axisLabel: { show: false }
     },
     series: [
       {
         name: '路径',
         type: 'lines',
-        data: pathLines,
-        silent: true,
         coordinateSystem: 'cartesian2d',
-        lineStyle: { width: 2, color: '#d1d5db' }
+        data: pathLines,
+        lineStyle: {
+          color: 'rgba(147, 197, 253, 0.3)',
+          width: 2
+        },
+        silent: true
       },
       {
         name: '任务路径',
         type: 'lines',
-        data: taskPathLines,
-        silent: true,
         coordinateSystem: 'cartesian2d',
-        lineStyle: { width: 4 },
+        data: taskPathLines,
         effect: {
           show: true,
-          period: 4,
-          trailLength: 0.3,
           symbol: 'arrow',
           symbolSize: 8,
-          color: '#fff'
+          color: '#fbbf24',
+          period: 3
+        },
+        lineStyle: {
+          color: '#fbbf24',
+          width: 3
         }
       },
       {
         name: '节点',
         type: 'scatter',
         data: nodePoints,
-        label: { show: true, formatter: '{b}', position: 'inside', color: '#1f2937', fontSize: 11, fontWeight: 500 }
+        symbolSize: 32,
+        label: {
+          show: true,
+          formatter: '{b}',
+          position: 'inside',
+          color: '#fff',
+          fontSize: 11,
+          fontWeight: 500
+        }
       },
       {
         name: '目标点',
         type: 'scatter',
         data: targetPoints,
-        symbolSize: 18,
-        label: { show: true, formatter: '目标', position: 'top', color: '#ef4444', fontSize: 10, fontWeight: 'bold' },
-        animation: true,
-        animationDuration: 1000,
-        animationEasingUpdate: 'elasticOut'
+        symbolSize: 10,
+        symbol: 'pin',
+        label: {
+          show: true,
+          formatter: '目标',
+          position: 'top',
+          color: '#ef4444',
+          fontSize: 10,
+          fontWeight: 600
+        },
+        z: 10
       },
       {
         name: 'AGV',
         type: 'scatter',
         data: agvPoints,
-        label: { show: true, formatter: '{b}', position: 'top', color: '#1f2937', fontSize: 11, fontWeight: 600 },
-        animation: true,
-        animationDuration: 800,
-        animationEasingUpdate: 'cubicInOut'
+        symbol: 'circle',
+        label: {
+          show: true,
+          formatter: '{b}',
+          position: 'top',
+          color: '#f1f5f9',
+          fontSize: 11,
+          fontWeight: 500,
+          textBorderColor: 'rgba(15, 23, 42, 0.8)',
+          textBorderWidth: 2
+        },
+        z: 100,
+        animation: false
       }
     ]
-  }
+  })
+}
 
-  mapChartInstance.setOption(option, true)
+const startAnimation = () => {
+  const animate = (timestamp) => {
+    if (timestamp - lastUpdateTime >= 50) {
+      if (props.getAgvAnimatedPosition) {
+        const agvPoints = props.agvList.map(agv => ({
+          name: agv.agvNo,
+          value: props.getAgvAnimatedPosition(agv.id),
+          symbolSize: 28,
+          itemStyle: {
+            color: getAgvStatusColor(agv.status),
+            shadowBlur: 15,
+            shadowColor: getAgvStatusColor(agv.status)
+          },
+          currentPosition: agv.currentPosition,
+          status: agv.status,
+          battery: agv.battery,
+          currentTaskId: agv.currentTaskId
+        }))
+
+        mapChart.setOption({
+          series: [{
+            name: 'AGV',
+            data: agvPoints
+          }]
+        })
+      }
+      lastUpdateTime = timestamp
+    }
+    animationFrame = requestAnimationFrame(animate)
+  }
+  animationFrame = requestAnimationFrame(animate)
+}
+
+const stopAnimation = () => {
+  if (animationFrame) {
+    cancelAnimationFrame(animationFrame)
+    animationFrame = null
+  }
 }
 
 const handleResize = () => {
-  mapChartInstance?.resize()
+  mapChart?.resize()
 }
 
-watch(
-  () => [props.agvList, props.executingTasks],
-  () => {
-    nextTick(() => updateChart())
-  },
-  { deep: true }
-)
+watch(() => props.agvList, () => {
+  updateChart()
+}, { deep: true })
+
+watch(() => props.executingTasks, () => {
+  updateChart()
+}, { deep: true })
 
 onMounted(() => {
-  initChart()
+  nextTick(() => {
+    initChart()
+  })
   window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
+  stopAnimation()
   window.removeEventListener('resize', handleResize)
-  mapChartInstance?.dispose()
+  mapChart?.dispose()
 })
 </script>
 
 <style lang="scss" scoped>
 .map-visualization {
-  height: 100%;
   display: flex;
   flex-direction: column;
+  height: 100%;
+  background: rgba(15, 23, 42, 0.8);
+  border-radius: 8px;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  overflow: hidden;
 
   .panel-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding: 12px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.9) 0%, rgba(15, 23, 42, 0.9) 100%);
+    border-bottom: 1px solid rgba(59, 130, 246, 0.2);
 
     h3 {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 600;
-      color: #e0e7ff;
       display: flex;
       align-items: center;
       gap: 8px;
-    }
+      margin: 0;
+      font-size: 16px;
+      color: #f1f5f9;
 
-    .legend {
-      display: flex;
-      gap: 16px;
-      font-size: 12px;
-      color: #9ca3af;
-
-      .legend-item {
-        display: flex;
-        align-items: center;
-        gap: 6px;
+      .el-icon {
+        color: '#fbbf24';
+        font-size: 20px;
       }
+    }
+  }
+
+  .map-legend {
+    display: flex;
+    gap: 12px;
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      color: #94a3b8;
 
       .legend-dot {
         width: 10px;
@@ -339,9 +372,9 @@ onUnmounted(() => {
     }
   }
 
-  .map-chart {
+  .map-container {
     flex: 1;
-    min-height: 0;
+    min-height: 300px;
   }
 }
 </style>

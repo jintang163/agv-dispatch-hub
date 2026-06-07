@@ -294,6 +294,25 @@ export const mockHistoryStats = {
   ]
 }
 
+export const mockCompletedTasks = mockHistoryStats.recentCompletedTasks.map((task, index) => ({
+  id: 1000 + index,
+  taskNo: task.taskNo,
+  taskType: task.type,
+  priority: 'MEDIUM',
+  startPoint: task.startPoint,
+  endPoint: task.endPoint,
+  status: 3,
+  assignedAgv: `AGV-00${(index % 6) + 1}`,
+  progress: 100,
+  currentPath: [task.startPoint, 'C02', task.endPoint],
+  pathIndex: 2,
+  createTime: new Date(Date.now() - (index + 1) * 300000).toISOString(),
+  startTime: new Date(Date.now() - (index + 1) * 600000).toISOString(),
+  endTime: new Date(Date.now() - index * 300000).toISOString(),
+  duration: task.duration,
+  mileage: task.mileage
+}))
+
 export function getRandomOffset() {
   return (Math.random() - 0.5) * 0.8
 }
